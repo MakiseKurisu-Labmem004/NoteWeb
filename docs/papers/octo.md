@@ -3,8 +3,6 @@
 title: "Octo: An Open-Source Generalist Robot Policy"
 description: "Octo 的核心问题是如何用一个通用机器人策略兼容不同机器人、传感器、任务定义和动作空间。核心理解：将异构输入统一为 Token，通过 Block-wise Causal Transformer 得到 Readout 决策表示，再用轻量 Diffusion Head 生成连续 Action Chunk。"
 date: "2026-09-05"
-tags: ["待分类"]
-status: "待读"
 venue: "Robotics: Science and Systems (RSS) 2024"
 authors: "Octo Model Team, Dibya Ghosh, Homer Walke, Karl Pertsch, Kevin Black, Oier Mees, et al."
 paper: ""
