@@ -1,0 +1,6 @@
+node_modules/
+docs/.vitepress/cache/
+docs/.vitepress/dist/
+.tools/
+.DS_Store
+*.local
