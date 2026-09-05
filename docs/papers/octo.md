@@ -13,6 +13,8 @@ code: ""
 
 # Octo
 
+![](./images/Octo.png)
+
 ## 1. 一句话理解
 
 Octo 是一个 **Transformer-based generalist robot policy**：
