@@ -7,254 +7,150 @@ venue: "arXiv / 2024"
 authors: "Songming Liu, Lingxuan Wu, Bangguo Li, Hengkai Tan, Huayu Chen, Zhengyi Wang, Ke Xu, Hang Su, Jun Zhu"
 paper: ""
 code: ""
---------
+---
 
 # RDT-1B
 
 ![](./images/RDT-1B.png)
 
-## 1. 一句话理解
+## 1 技术详述：从一条数据完整走一遍 RDT-1B
 
-RDT-1B 本质上是一个：
+RDT-1B 的基本学习问题是：
+
+$$
+p(A_t\mid \ell,o_t)
+$$
+
+其中：
+
+$$
+\ell=\text{语言指令}
+$$
+
+observation 定义为：
+
+$$
+o_t=
+\left(
+X_{t-T_{\mathrm{img}}+1:t},
+z_t,
+c
+\right)
+$$
+
+其中：
+
+$$
+X_{t-T_{\mathrm{img}}+1:t}
+=
+\text{RGB observation history}
+$$
+
+$$
+z_t
+=
+\text{robot proprioception}
+$$
+
+$$
+c
+=
+\text{control frequency}
+$$
+
+论文配置：
+
+$$
+T_{\mathrm{img}}=2
+$$
+
+即保留最近两个 observation time step。
+
+而 RDT 并不只预测下一步：
+
+$$
+a_t
+$$
+
+而是一次预测未来一个 Action Chunk：
+
+$$
+A_t
+=
+[a_t,a_{t+1},\ldots,a_{t+T_a-1}]
+$$
+
+论文配置：
 
 $$
 \boxed{
-\text{以 Robot State + Noisy Action 为主序列的 Diffusion Transformer}
+T_a=64
 }
 $$
 
-语言和图像**不直接与动作拼成一条长序列**，而是作为条件：
+因此真正建模的是：
 
 $$
 \boxed{
-\text{Language / Image}
-\xrightarrow{\text{Cross-Attention}}
-\text{Action Generation}
+p(A_t\mid\ell,o_t)
+=
+p(a_t,\ldots,a_{t+63}\mid\ell,o_t)
 }
 $$
 
-最终学习：
+RDT-1B 与 RDT2 一个非常重要的区别是：
 
 $$
-p(A_{t:t+63}\mid l,o_t)
+\boxed{
+\text{RDT-1B 从预训练到微调始终使用 Diffusion Objective}
+}
 $$
 
-一次生成未来：
+它没有：
 
 $$
-\boxed{64\text{ 步 Action Chunk}}
+\text{RVQ}
+\rightarrow
+\text{Autoregressive}
+\rightarrow
+\text{Flow Matching}
 $$
 
-最核心的结构可以记成：
+这样的阶段切换。
 
-```text
-Language ── T5 ───── Adapter ────────┐
-                                     │
-Images ─── SigLIP ── Adapter ────────┤
-                                     │ Cross-Attention
-                                     ▼
-                         RDT Transformer × 28
-                                     ▲
-                                     │
-Diffusion Step ──────────────────────┤
-Control Frequency ──────────────────┤ Main Sequence
-Robot State ─────────────────────────┤
-Noisy Action Chunk × 64 ─────────────┘
-                                     │
-                                     ▼
-                                MLP Decoder
-                                     │
-                                     ▼
-                          Predicted Clean Action
-                              64 × 128
-```
+RDT-1B 的两阶段只是：
+
+$$
+\boxed{
+\text{Multi-Robot Diffusion Pre-training}
+\rightarrow
+\text{Target Bimanual Diffusion Fine-tuning}
+}
+$$
+
+模型结构和训练目标基本不变。
 
 ---
 
-## 2. 为什么需要 RDT
+### 1.1 第一层解决方案：Physically Interpretable Unified Action Space
 
-### 2.1 Action Multi-Modality
-
-对于完全相同的：
-
-$$
-(o_t,l)
-$$
-
-可能存在多种都正确的动作轨迹：
-
-* 左手抓、右手辅助；
-* 右手抓、左手辅助；
-* 从左侧绕过去；
-* 从右侧绕过去；
-* 先移动左手；
-* 先移动右手。
-
-因此动作并不适合建模成唯一的确定映射：
-
-$$
-(o_t,l)\rightarrow a_t
-$$
-
-而应该学习：
+RDT 面临的第一个数据问题不是图像，而是：
 
 $$
 \boxed{
-p(A\mid o_t,l)
+\text{不同机器人根本没有统一的 State / Action 定义}
 }
 $$
 
-RDT 因此采用 Diffusion Model 来表示复杂、多峰的动作分布。
-
----
-
-### 2.2 Multi-Robot Heterogeneity
-
-不同机器人的数据存在：
+假设机器人 $r$ 的原始 proprioception：
 
 $$
-\boxed{
-\text{不同 DoF}
-+
-\text{不同 State 定义}
-+
-\text{不同 Action 定义}
-+
-\text{不同 Control Frequency}
-}
-$$
-
-例如不同机器人中第 $i$ 个 action dimension 可能代表完全不同的物理量。
-
-直接：
-
-```text
-Robot A Action
-Robot B Action
-Robot C Action
-      ↓
-直接 Padding / Concat
-      ↓
-Transformer
-```
-
-会产生严重的语义错位。
-
-所以 RDT 定义：
-
-$$
-\boxed{
-128D\ \text{Physically Interpretable Unified State/Action Space}
-}
-$$
-
-重点不是简单变成 $128$ 维，而是：
-
-> **128 个位置分别具有固定物理语义。**
-
-不同机器人根据其实际物理定义，将 state/action 填入对应位置。
-
-不存在的维度：
-
-$$
-\boxed{\text{Mask}}
-$$
-
-而不是随便赋予新的物理意义。
-
----
-
-## 3. RDT 的整体架构
-
-整个模型应该分成三部分理解：
-
-$$
-\boxed{
-\text{Condition Encoder}
-+
-\text{Robot Main Sequence}
-+
-\text{Diffusion Transformer}
-}
-$$
-
-总体：
-
-```text
-                         Language l
-                             │
-                             ▼
-                       Frozen T5-XXL
-                             │
-                         4096D tokens
-                             │
-                             ▼
-                      Language Adapter
-                             │
-                         2048D tokens
-                             │
-                             ├──────────────┐
-                             │              │
-Images                       │              │
-  │                          │              │
-  ▼                          │              │
-Frozen SigLIP                │              │
-  │                          │              │
-1152D Patch Tokens           │              │
-  │                          │              │
-  ▼                          │              │
-Image Adapter                │              │
-  │                          │              │
-2048D Tokens                 │              │
-  └──────────────────────────┤
-                             │
-                             │ Cross-Attention
-                             ▼
-                   ┌───────────────────────┐
-                   │   RDT Transformer     │
-                   │      × 28 Layers      │
-                   └──────────▲────────────┘
-                              │
-                              │ Main Sequence
-                              │
-                   [k][freq][state][A_k ×64]
-                              │
-                              ▼
-                          RMSNorm
-                              │
-                              ▼
-                         MLP Decoder
-                              │
-                              ▼
-                    Predicted Clean Action
-                           Â_0 × 64
-```
-
-这里最重要的是区分：
-
-$$
-\boxed{\text{Main Sequence}}
-$$
-
-和：
-
-$$
-\boxed{\text{Condition Sequence}}
-$$
-
----
-
-## 4. 128D Unified Physical Space
-
-设某机器人 $r$ 原始 proprioception 为：
-
-$$
-s_t^{(r)}
+z_t^{(r)}
 \in
-\mathbb R^{d_s^{(r)}}
+\mathbb R^{d_z^{(r)}}
 $$
 
-原始 action 为：
+原始 action：
 
 $$
 a_t^{(r)}
@@ -262,13 +158,7 @@ a_t^{(r)}
 \mathbb R^{d_a^{(r)}}
 $$
 
-不同机器人：
-
-$$
-d_s^{(r_1)}
-\neq
-d_s^{(r_2)}
-$$
+对于不同机器人：
 
 $$
 d_a^{(r_1)}
@@ -276,347 +166,611 @@ d_a^{(r_1)}
 d_a^{(r_2)}
 $$
 
-RDT 首先通过机器人对应的物理映射：
+而且即使维度相同：
 
 $$
-U_r
+a_i^{(r_1)}
 $$
 
-将它们放入统一空间：
+和：
 
 $$
-z_t
-=
-U_r(s_t^{(r)})
-\in
-\mathbb R^{128}
+a_i^{(r_2)}
 $$
 
-$$
-a_t
-=
-U_r(a_t^{(r)})
-\in
-\mathbb R^{128}
-$$
+也可能代表完全不同的物理量。
 
-同时产生 Valid Dimension Mask：
+例如某个机器人：
 
 $$
-m_z\in\{0,1\}^{128}
+a_1=\text{joint position}
 $$
 
-$$
-m_a\in\{0,1\}^{128}
-$$
-
-其中：
+另一个机器人：
 
 $$
-m_i=1
+a_1=\text{EEF translation}
 $$
 
-表示：
-
-> 当前机器人确实拥有这个物理维度。
-
-而：
+如果简单 padding：
 
 $$
-m_i=0
+[a_1,a_2,\ldots]
+\rightarrow
+128D
 $$
 
-表示：
+模型看到的是：
 
-> 当前机器人不存在这个维度。
+*> 相同 position 上出现了完全不同的物理意义。*
 
-因此不同机器人最终都变成：
+这会造成：
 
 $$
 \boxed{
-State\in\mathbb R^{128}
+\text{Negative Transfer}
 }
 $$
+
+因此 RDT 定义：
 
 $$
 \boxed{
-Action\in\mathbb R^{128}
+128D\ \text{Physically Interpretable Unified Action Space}
 }
 $$
 
-这是多机器人联合训练的基础。
+这里最关键的不是：
+
+$$
+128D
+$$
+
+而是：
+
+$$
+\boxed{
+\text{每一个位置具有固定的物理语义}
+}
+$$
 
 ---
 
-## 5. RDT 的输入到底有哪些
+#### 128D 里面放了什么？
 
-一个训练样本可以抽象为：
+统一空间大致划分为：
+
+| Index | Physical Quantity |
+|---|---|
+| $0\sim9$ | Right arm joint positions |
+| $10\sim14$ | Right gripper joint positions |
+| $15\sim24$ | Right arm joint velocities |
+| $25\sim29$ | Right gripper joint velocities |
+| $30\sim32$ | Right EEF position |
+| $33\sim38$ | Right EEF 6D pose |
+| $39\sim41$ | Right EEF velocity |
+| $42\sim44$ | Right EEF angular velocity |
+| $45\sim49$ | Reserved |
+| $50\sim59$ | Left arm joint positions |
+| $60\sim64$ | Left gripper joint positions |
+| $65\sim74$ | Left arm joint velocities |
+| $75\sim79$ | Left gripper joint velocities |
+| $80\sim82$ | Left EEF position |
+| $83\sim88$ | Left EEF 6D pose |
+| $89\sim91$ | Left EEF velocity |
+| $92\sim94$ | Left EEF angular velocity |
+| $95\sim99$ | Reserved |
+| $100\sim101$ | Base linear velocity |
+| $102$ | Base angular velocity |
+| $103\sim127$ | Reserved |
+
+对于 single-arm robot：
 
 $$
 \boxed{
-(l,\ I,\ z_t,\ c,\ A_0)
+\text{统一映射到 Right Arm 区域}
 }
 $$
 
-其中：
+例如一个只有 $6$ DoF 的机器人，joint position 就填入：
 
 $$
-l
+[0,6)
 $$
 
-是语言任务；
+而不是重新定义新的 6 个位置。
+
+因此机器人 $r$ 的原始 state：
 
 $$
-I
+z_t^{(r)}
 $$
 
-是多摄像头历史图像；
+经过物理语义映射：
+
+$$
+z_t^{(r)}
+\xrightarrow{U_r}
+z_t
+\in
+\mathbb R^{128}
+$$
+
+同理：
+
+$$
+a_t^{(r)}
+\xrightarrow{U_r}
+a_t
+\in
+\mathbb R^{128}
+$$
+
+于是 Action Chunk：
+
+$$
+A_t
+=
+[a_t,\ldots,a_{t+63}]
+$$
+
+统一变成：
+
+$$
+\boxed{
+A_t\in\mathbb R^{64\times128}
+}
+$$
+
+---
+
+#### Padding 还有一个隐藏问题
+
+假设某个机器人没有：
+
+$$
+\text{base angular velocity}
+$$
+
+那么对应位置必须 padding。
+
+最简单可能填：
+
+$$
+0
+$$
+
+但是对于机器人：
+
+$$
+0\text{ velocity}
+$$
+
+本身意味着：
+
+$$
+\text{静止}
+$$
+
+所以模型无法区分：
+
+$$
+\boxed{
+0=\text{真实物理量}
+}
+$$
+
+还是：
+
+$$
+\boxed{
+0=\text{padding}
+}
+$$
+
+RDT 因此额外构造一个 availability mask：
+
+$$
+m\in\{0,1\}^{128}
+$$
+
+例如：
+
+$$
+m_i=
+\begin{cases}
+1,&\text{该机器人存在这个 physical quantity}\\
+0,&\text{该位置只是 padding}
+\end{cases}
+$$
+
+于是实际编码 state 时不是只输入：
 
 $$
 z_t\in\mathbb R^{128}
 $$
 
-是机器人当前 proprioception；
-
-$$
-c
-$$
-
-是 control frequency；
-
-$$
-A_0
-=
-[a_t,\ldots,a_{t+63}]
-\in
-\mathbb R^{64\times128}
-$$
-
-是真实未来 Action Chunk。
-
-Diffusion 训练以后还会得到：
-
-$$
-A_k
-$$
-
-以及 diffusion timestep：
-
-$$
-k
-$$
-
-所以实际进入网络的信息是：
+而是：
 
 $$
 \boxed{
-(l,I,z_t,c,A_k,k)
+[z_t;m_z]
+\in
+\mathbb R^{256}
 }
 $$
 
----
-
-## 6. Language Encoding
-
-输入自然语言：
-
-$$
-l
-$$
-
-先 tokenize：
-
-$$
-l
-\rightarrow
-[w_1,\ldots,w_{N_L}]
-$$
-
-再进入冻结的 T5-XXL：
-
-$$
-[w_1,\ldots,w_{N_L}]
-\xrightarrow{\text{T5-XXL}}
-H_L
-$$
-
-得到：
-
-$$
-H_L
-\in
-\mathbb R^{N_L\times4096}
-$$
-
-然后通过 Language Adapter：
-
-$$
-\mathbb R^{4096}
-\rightarrow
-\mathbb R^{2048}
-$$
-
-得到：
+对于每一个 action：
 
 $$
 \boxed{
-C_L
-=
-[L_1,\ldots,L_{N_L}]
+[a_i;m_a]
 \in
-\mathbb R^{N_L\times2048}
+\mathbb R^{256}
 }
 $$
 
-它不会 concat 到 Main Sequence。
-
-而是保存为：
+所以可以把 Unified Action Space 理解成两层：
 
 $$
-\boxed{\text{Language Condition}}
+\boxed{
+\text{128D Physical Value}
++
+\text{128D Availability Information}
+}
 $$
 
-在对应 Transformer Layer 的 Cross-Attention 中作为：
+前者告诉模型：
 
-$$
-K,V
-$$
+*> 当前物理量是多少？*
 
-使用。
+后者告诉模型：
+
+*> 这个物理量在当前 embodiment 上是否存在？*
 
 ---
 
-## 7. Image Encoding
+### 1.2 一条训练数据最开始长什么样？
 
-RDT 最多可以使用：
+从一个机器人数据集取一个时刻 $t$。
+
+原始数据可以抽象成：
 
 $$
-2\text{ 个时间时刻}
+\left(
+\ell,
+X_{t-1:t},
+z_t^{(r)},
+c,
+A_t^{(r)}
+\right)
+$$
+
+其中图像历史：
+
+$$
+X_{t-1:t}
+$$
+
+论文配置为：
+
+$$
+2\text{ time steps}
 \times
-3\text{ 个摄像头}
+3\text{ cameras}
 $$
 
-例如：
-
-```text
-ext(t-1)
-right_wrist(t-1)
-left_wrist(t-1)
-
-ext(t)
-right_wrist(t)
-left_wrist(t)
-```
-
-设：
+三个 camera 分别是：
 
 $$
-T_o=2
+\boxed{
+\text{Exterior}
++
+\text{Right Wrist}
++
+\text{Left Wrist}
+}
 $$
 
-摄像头数量：
+因此最多得到：
 
 $$
-N_c=3
-$$
-
-则共有：
-
-$$
-T_oN_c=6
+2\times3=6
 $$
 
 张图像。
 
-设每张原始图像：
+原始机器人 state：
 
 $$
-I_{j}
-\in
-\mathbb R^{H_I\times W_I\times3}
+z_t^{(r)}
 $$
 
-冻结的 SigLIP 将其编码为 patch tokens：
+经过 Unified Physical Space：
 
 $$
-I_j
-\xrightarrow{\text{SigLIP}}
-V_j
+z_t^{(r)}
+\rightarrow
+z_t\in\mathbb R^{128}
 $$
 
-设每张图产生 $N_P$ 个 patch token：
+未来 64 步动作：
 
 $$
-V_j
-\in
-\mathbb R^{N_P\times1152}
-$$
-
-六张图组合：
-
-$$
-V
+A_t^{(r)}
 =
-[V_1;V_2;\ldots;V_6]
+[a_t^{(r)},\ldots,a_{t+63}^{(r)}]
+$$
+
+经过统一映射：
+
+$$
+A_t^{(r)}
+\rightarrow
+A_0
+$$
+
+其中：
+
+$$
+\boxed{
+A_0
+\in
+\mathbb R^{64\times128}
+}
+$$
+
+这里记成 $A_0$，是因为在 diffusion 中：
+
+$$
+0
+$$
+
+表示：
+
+$$
+\boxed{
+\text{Clean Action}
+}
+$$
+
+所以一条标准训练数据现在变成：
+
+$$
+\boxed{
+(
+\ell,
+X_{t-1:t},
+z_t,
+c,
+A_0
+)
+}
+$$
+
+---
+
+### 1.3 Diffusion Training：先把真实动作加噪
+
+RDT 不是学习：
+
+$$
+(\ell,o_t)\rightarrow A_0
+$$
+
+的普通 deterministic regression。
+
+因为对于完全相同的：
+
+$$
+(\ell,o_t)
+$$
+
+可能存在多个正确 Action Chunk：
+
+$$
+A_0^{(1)},
+A_0^{(2)},
+A_0^{(3)},\ldots
+$$
+
+例如双臂任务中：
+
+$$
+\text{左手先动}
+$$
+
+和：
+
+$$
+\text{右手先动}
+$$
+
+可能都正确。
+
+如果直接 MSE regression：
+
+$$
+f(\ell,o_t)
+\approx
+\frac{
+A^{(1)}+A^{(2)}
+}{2}
+$$
+
+就可能得到一个：
+
+$$
+\boxed{
+\text{两个正确 mode 的错误平均}
+}
+$$
+
+因此 RDT 学习完整条件分布：
+
+$$
+\boxed{
+p(A_0\mid\ell,o_t)
+}
+$$
+
+---
+
+#### Step 1：随机采 diffusion timestep
+
+训练使用 DDPM noise schedule。
+
+随机采：
+
+$$
+k\sim
+\operatorname{Uniform}
+\{1,\ldots,K\}
+$$
+
+论文训练配置：
+
+$$
+\boxed{
+K=1000
+}
+$$
+
+---
+
+#### Step 2：采 Gaussian Noise
+
+$$
+\epsilon
+\sim
+\mathcal N(0,I)
+$$
+
+shape 与 Action Chunk 完全相同：
+
+$$
+\epsilon
+\in
+\mathbb R^{64\times128}
+$$
+
+---
+
+#### Step 3：构造 Noisy Action Chunk
+
+根据 noise schedule：
+
+$$
+\bar\alpha_k
+=
+\prod_{i=1}^{k}\alpha_i
+$$
+
+构造：
+
+$$
+\boxed{
+\tilde A_k
+=
+\sqrt{\bar\alpha_k}A_0
++
+\sqrt{1-\bar\alpha_k}\epsilon
+}
 $$
 
 因此：
 
 $$
-V
-\in
-\mathbb R^{6N_P\times1152}
-$$
-
-然后 Image Adapter：
-
-$$
-\mathbb R^{1152}
+A_0
 \rightarrow
-\mathbb R^{2048}
+\tilde A_k
 $$
 
-得到：
+shape 不变：
 
 $$
 \boxed{
-C_I
+\tilde A_k
 \in
-\mathbb R^{6N_P\times2048}
+\mathbb R^{64\times128}
 }
 $$
 
-它同样不会进入 Main Sequence。
-
-而保存为：
+当：
 
 $$
-\boxed{\text{Image Condition}}
+k\approx0
 $$
 
-供 Cross-Attention 使用。
+时：
+
+$$
+\tilde A_k
+\approx
+A_0
+$$
+
+而当：
+
+$$
+k\approx K
+$$
+
+时：
+
+$$
+\tilde A_k
+\approx
+\epsilon
+$$
+
+所以 RDT 的任务是：
+
+$$
+\boxed{
+\tilde A_k
+\xrightarrow[\ell,o_t,k]{RDT}
+\hat A_0
+}
+$$
+
+这里非常关键：
+
+$$
+\boxed{
+RDT-1B\ 直接预测 Clean Action
+}
+$$
+
+不是预测：
+
+$$
+\epsilon
+$$
+
+也不是预测：
+
+$$
+v
+$$
+
+而是直接预测：
+
+$$
+A_0
+$$
+
+即：
+
+$$
+x_0\text{-prediction}
+$$
 
 ---
 
-## 8. Low-Dimensional Inputs
+### 1.4 Low-Dimensional Inputs 怎么进入 Transformer？
 
-RDT 中以下数据属于低维机器人数据：
-
-$$
-\boxed{
-\text{State}
-+
-\text{Action}
-+
-\text{Control Frequency}
-+
-\text{Diffusion Timestep}
-}
-$$
-
-### 8.1 Robot State
-
-统一后的 state：
+目前有：
 
 $$
 z_t
@@ -624,65 +778,207 @@ z_t
 \mathbb R^{128}
 $$
 
-经过 State Adapter / MLP：
-
 $$
-z_t
-\xrightarrow{\text{MLP}}
-T_z
-$$
-
-得到：
-
-$$
-T_z
-\in
-\mathbb R^{2048}
-$$
-
-也就是：
-
-$$
-\boxed{\text{一个 State Token}}
-$$
-
----
-
-### 8.2 Action
-
-每一个 noisy action：
-
-$$
-a_i^k
-\in
-\mathbb R^{128}
-$$
-
-经过 Action / State Adapter：
-
-$$
-a_i^k
-\xrightarrow{\text{MLP}}
-T_{a_i}
-$$
-
-得到：
-
-$$
-T_{a_i}
-\in
-\mathbb R^{2048}
-$$
-
-一共 $64$ 个 action：
-
-$$
-A_k
+\tilde A_k
 \in
 \mathbb R^{64\times128}
 $$
 
-变成：
+$$
+c
+$$
+
+以及：
+
+$$
+k
+$$
+
+RDT 不会把这些数值直接送进 Transformer，而是全部编码到统一的：
+
+$$
+D=2048
+$$
+
+token space。
+
+---
+
+#### Robot State
+
+首先加 availability mask：
+
+$$
+[z_t;m_z]
+\in
+\mathbb R^{256}
+$$
+
+然后通过低维输入 MLP：
+
+$$
+[z_t;m_z]
+\xrightarrow{\text{MLP}}
+T_z
+$$
+
+得到：
+
+$$
+\boxed{
+T_z\in\mathbb R^{1\times2048}
+}
+$$
+
+即：
+
+$$
+\boxed{
+1\text{ 个 Robot State Token}
+}
+$$
+
+---
+
+#### Noisy Action Chunk
+
+对于第 $i$ 个 noisy action：
+
+$$
+\tilde a_i^k
+\in
+\mathbb R^{128}
+$$
+
+拼 availability mask：
+
+$$
+[\tilde a_i^k;m_a]
+\in
+\mathbb R^{256}
+$$
+
+RDT 对 state 和 action 使用 shared MLP，因为：
+
+$$
+\boxed{
+\text{两者描述的是相似的机器人 physical quantities}
+}
+$$
+
+因此：
+
+$$
+[\tilde a_i^k;m_a]
+\xrightarrow{\text{Shared MLP}}
+T_{a_i}
+$$
+
+其中：
+
+$$
+T_{a_i}
+\in
+\mathbb R^{2048}
+$$
+
+64 步一起得到：
+
+$$
+\boxed{
+T_A
+\in
+\mathbb R^{64\times2048}
+}
+$$
+
+与离散 Action Token 不同，这里始终保持：
+
+$$
+\boxed{
+\text{Continuous Action Encoding}
+}
+$$
+
+不存在 RVQ / binning quantization。
+
+---
+
+#### Control Frequency
+
+不同机器人可能：
+
+$$
+5Hz,\quad10Hz,\quad20Hz,\quad50Hz
+$$
+
+如果模型不知道 control frequency，同一个数值：
+
+$$
+\Delta q
+$$
+
+在不同频率下对应的真实运动速度不同。
+
+因此：
+
+$$
+c
+\xrightarrow{\text{Fourier Features / MLP}}
+T_c
+$$
+
+最终：
+
+$$
+\boxed{
+T_c\in\mathbb R^{1\times2048}
+}
+$$
+
+Control Frequency 本质上告诉模型：
+
+$$
+\boxed{
+\text{应该用什么时间尺度解释 Action}
+}
+$$
+
+---
+
+#### Diffusion Timestep
+
+同理：
+
+$$
+k
+\xrightarrow{\text{Fourier Features / MLP}}
+T_k
+$$
+
+得到：
+
+$$
+\boxed{
+T_k\in\mathbb R^{1\times2048}
+}
+$$
+
+它告诉 denoiser：
+
+*> 当前动作到底有多 noisy？*
+
+---
+
+### 1.5 Main Sequence 怎么构造？
+
+目前：
+
+$$
+T_z
+\in
+\mathbb R^{1\times2048}
+$$
 
 $$
 T_A
@@ -690,1609 +986,175 @@ T_A
 \mathbb R^{64\times2048}
 $$
 
----
-
-### 8.3 Diffusion Timestep
-
-扩散时间步：
-
-$$
-k
-$$
-
-先做 sinusoidal / Fourier-style embedding：
-
-$$
-k
-\xrightarrow{\text{SinCos}}
-e_k
-$$
-
-再经过 MLP：
-
-$$
-e_k
-\xrightarrow{\text{MLP}}
-T_k
-$$
-
-最终：
-
-$$
-T_k\in\mathbb R^{2048}
-$$
-
-是：
-
-$$
-\boxed{\text{一个 Diffusion Timestep Token}}
-$$
-
----
-
-### 8.4 Control Frequency
-
-控制频率：
-
-$$
-c
-$$
-
-例如：
-
-$$
-5Hz,\ 10Hz,\ 20Hz,\ 50Hz
-$$
-
-同样：
-
-$$
-c
-\xrightarrow{\text{SinCos / Fourier}}
-e_c
-\xrightarrow{\text{MLP}}
-T_c
-$$
-
-得到：
-
 $$
 T_c
 \in
-\mathbb R^{2048}
+\mathbb R^{1\times2048}
 $$
-
-即：
-
-$$
-\boxed{\text{一个 Frequency Token}}
-$$
-
-为什么必须告诉模型 frequency？
-
-因为同样：
-
-$$
-\Delta x=0.01
-$$
-
-如果：
-
-$$
-c=5Hz
-$$
-
-和：
-
-$$
-c=50Hz
-$$
-
-其实际运动速度完全不同。
-
-因此 frequency 本质上告诉模型：
-
-> **如何按照时间尺度解释 Action。**
-
----
-
-## 9. Main Sequence 是怎么构造的
-
-完成上述编码之后：
-
-$$
-T_k\in\mathbb R^{1\times2048}
-$$
-
-$$
-T_c\in\mathbb R^{1\times2048}
-$$
-
-$$
-T_z\in\mathbb R^{1\times2048}
-$$
-
-$$
-T_A\in\mathbb R^{64\times2048}
-$$
-
-按顺序 concat：
-
-$$
-X_0
-=
-[
-T_k;
-T_c;
-T_z;
-T_{a_1};
-\ldots;
-T_{a_{64}}
-]
-$$
-
-得到：
-
-$$
-\boxed{
-X_0
-\in
-\mathbb R^{67\times2048}
-}
-$$
-
-因为：
-
-$$
-1+1+1+64=67
-$$
-
-再加入 multimodal position embedding：
-
-$$
-X_0
-\leftarrow
-X_0+P
-$$
-
-shape 不改变：
-
-$$
-67\times2048
-$$
-
-这就是整个 Transformer 真正进行 Self-Attention 的：
-
-$$
-\boxed{\text{Main Sequence}}
-$$
-
-因此 RDT **不是**：
-
-```text
-Language
-Image
-State
-Action
-  ↓
-全部 concat
-  ↓
-Self-Attention
-```
-
-而是：
-
-```text
-[k][freq][state][action ×64]
-           │
-           ▼
-      Self-Attention
-           │
-           │ Q
-           ▼
-      Cross-Attention
-           ▲
-           │ K,V
-      Language / Image
-```
-
----
-
-## 10. 一个 RDT Transformer Block
-
-RDT-1B 有：
-
-$$
-\boxed{28\text{ Layers}}
-$$
-
-hidden dimension：
-
-$$
-D=2048
-$$
-
-attention heads：
-
-$$
-h=32
-$$
-
-因此每个 head dimension：
-
-$$
-d_h
-=
-\frac{2048}{32}
-=
-64
-$$
-
-每一层结构：
-
-$$
-\boxed{
-\text{RMSNorm}
-\rightarrow
-\text{Self-Attention}
-\rightarrow+
-\text{RMSNorm}
-\rightarrow
-\text{Cross-Attention}
-\rightarrow+
-\text{RMSNorm}
-\rightarrow
-\text{FFN}
-\rightarrow+
-}
-$$
-
-也就是：
-
-```text
-X_l
- │
- ▼
-RMSNorm
- │
- ▼
-Self-Attention
- │
- + Residual
- │
- ▼
-RMSNorm
- │
- ▼
-Cross-Attention
- │
- + Residual
- │
- ▼
-RMSNorm
- │
- ▼
-FFN
- │
- + Residual
- │
- ▼
-X_{l+1}
-```
-
----
-
-## 11. Self-Attention 到底在做什么
-
-输入：
-
-$$
-X
-\in
-\mathbb R^{67\times2048}
-$$
-
-先：
-
-$$
-\bar X
-=
-\operatorname{RMSNorm}(X)
-$$
-
-shape 不变：
-
-$$
-67\times2048
-$$
-
-然后生成：
-
-$$
-Q=\bar XW_Q
-$$
-
-$$
-K=\bar XW_K
-$$
-
-$$
-V=\bar XW_V
-$$
-
-所以：
-
-$$
-\boxed{
-Q,K,V
-\text{ 全部来自 Main Sequence}
-}
-$$
-
-拆成 32 个 Attention Heads：
-
-$$
-Q,K,V
-\in
-\mathbb R^{32\times67\times64}
-$$
-
-RDT 还对：
-
-$$
-Q,K
-$$
-
-做 QK-Norm：
-
-$$
-Q
-\leftarrow
-\operatorname{RMSNorm}(Q)
-$$
-
-$$
-K
-\leftarrow
-\operatorname{RMSNorm}(K)
-$$
-
-然后：
-
-$$
-H_{\text{self}}
-=
-\operatorname{softmax}
-\left(
-\frac{QK^\top}{\sqrt{64}}
-\right)V
-$$
-
-重新合并 heads：
-
-$$
-H_{\text{self}}
-\in
-\mathbb R^{67\times2048}
-$$
-
-Residual：
-
-$$
-X'
-=
-X+H_{\text{self}}
-$$
-
-shape：
-
-$$
-\boxed{
-67\times2048
-}
-$$
-
----
-
-## 12. Action Token 在 Self-Attention 中看什么
-
-Main Sequence：
-
-$$
-[k,c,z,a_1,\ldots,a_{64}]
-$$
-
-所以任意 action token：
-
-$$
-a_i
-$$
-
-可以 Attend：
-
-$$
-\boxed{
-[k,c,z,a_1,\ldots,a_{64}]
-}
-$$
-
-也就是说：
-
-$$
-a_i
-\leftrightarrow
-a_j
-$$
-
-并没有 causal mask 限制。
-
-因此所有未来 action：
-
-$$
-a_1,\ldots,a_{64}
-$$
-
-可以：
-
-$$
-\boxed{\text{双向交换信息}}
-$$
-
-这意味着 RDT 不是：
-
-$$
-a_1
-\rightarrow
-a_2
-\rightarrow
-a_3
-\rightarrow\cdots
-$$
-
-这种 autoregressive generation。
-
-而是：
-
-$$
-\boxed{
-\text{一次联合建模整段未来轨迹}
-}
-$$
-
-比如：
-
-$$
-a_{20}
-$$
-
-可以影响：
-
-$$
-a_5
-$$
-
-从而让整个 Action Chunk 在空间和时间上保持协调。
-
----
-
-## 13. Cross-Attention 到底在做什么
-
-Self-Attention 之后：
-
-$$
-X'
-\in
-\mathbb R^{67\times2048}
-$$
-
-先：
-
-$$
-\bar X'
-=
-\operatorname{RMSNorm}(X')
-$$
-
-然后 Cross-Attention。
-
-关键区别：
-
-$$
-\boxed{
-Q=W_Q\bar X'
-}
-$$
-
-即：
-
-$$
-Q=\text{Main Sequence}
-$$
-
-但是：
-
-$$
-\boxed{
-K,V=W_{KV}C
-}
-$$
-
-其中：
-
-$$
-C=C_L
-$$
-
-或者：
-
-$$
-C=C_I
-$$
-
-所以：
-
-$$
-\boxed{
-Q=\text{Robot State / Action}
-}
-$$
-
-$$
-\boxed{
-K,V=\text{Language / Image}
-}
-$$
-
-例如对于 Language Layer：
-
-$$
-Q
-\in
-\mathbb R^{32\times67\times64}
-$$
-
-$$
-K_L,V_L
-\in
-\mathbb R^{32\times N_L\times64}
-$$
-
-Attention：
-
-$$
-H_{\text{cross}}
-=
-\operatorname{softmax}
-\left(
-\frac{QK_L^\top}{\sqrt{64}}
-\right)V_L
-$$
-
-最后：
-
-$$
-H_{\text{cross}}
-\in
-\mathbb R^{67\times2048}
-$$
-
-Residual：
-
-$$
-X''
-=
-X'
-+
-H_{\text{cross}}
-$$
-
-shape 不改变：
-
-$$
-\boxed{
-67\times2048
-}
-$$
-
-可以把 Cross-Attention 理解成：
-
-> 当前 state/action token 主动去询问：
->
-> **“生成我这个动作时，需要从语言或者图像中读取什么信息？”**
-
----
-
-## 14. Language / Image 为什么交替 Cross-Attention
-
-如果直接：
-
-$$
-C=[C_L;C_I]
-$$
-
-通常：
-
-$$
-N_{\text{image}}
-\gg
-N_{\text{language}}
-$$
-
-例如图像可能有几千 token：
-
-$$
-N_I\sim10^3
-$$
-
-而语言只有：
-
-$$
-N_L\sim10^1
-$$
-
-于是可能发生：
-
-$$
-\boxed{
-\text{Vision Dominates Language}
-}
-$$
-
-因此 RDT 不在同一个 Cross-Attention 中简单把两者拼起来，而采用交替注入：
-
-```text
-Layer 1  → Language Cross-Attention
-
-Layer 2  → Image Cross-Attention
-
-Layer 3  → Language Cross-Attention
-
-Layer 4  → Image Cross-Attention
-
-...
-
-Layer 27 → Language Cross-Attention
-
-Layer 28 → Image Cross-Attention
-```
-
-抽象：
-
-$$
-\boxed{
-C^{(l)}
-=
-\begin{cases}
-C_L,&l\text{ 为 Language Layer}\\
-C_I,&l\text{ 为 Image Layer}
-\end{cases}
-}
-$$
-
-因此：
-
-$$
-Language
-\rightarrow
-Image
-\rightarrow
-Language
-\rightarrow
-Image
-\rightarrow\cdots
-$$
-
-是 RDT 最有辨识度的架构设计之一。
-
----
-
-## 15. FFN 做什么
-
-Cross-Attention 后：
-
-$$
-X''
-\in
-\mathbb R^{67\times2048}
-$$
-
-先：
-
-$$
-\bar X''
-=
-\operatorname{RMSNorm}(X'')
-$$
-
-然后：
-
-$$
-H_{\text{FFN}}
-=
-\operatorname{FFN}(\bar X'')
-$$
-
-再 residual：
-
-$$
-X_{\text{out}}
-=
-X''
-+
-H_{\text{FFN}}
-$$
-
-所以 FFN 不负责：
-
-> token 与 token 之间交换信息。
-
-Attention 已经完成信息交互。
-
-FFN 负责：
-
-$$
-\boxed{
-\text{对每个 Token 的 Feature 做非线性变换}
-}
-$$
-
-输入输出 shape 都仍然：
-
-$$
-67\times2048
-$$
-
----
-
-## 16. Independent Random Masking
-
-多模态数据还有第二种 heterogeneity：
-
-$$
-\boxed{\text{Information Heterogeneity}}
-$$
-
-例如 exterior camera 通常信息量非常大。
-
-如果所有训练样本都完整提供 exterior camera，模型可能学习 shortcut：
-
-> 不需要认真理解 wrist camera、state 或 language，只看 exterior camera 就可以。
-
-RDT 因此在训练时独立 Mask 不同条件。
-
-例如：
-
-```text
-Language        ✓
-Exterior Cam    ×
-Right Wrist     ✓
-Left Wrist      ✓
-State           ✓
-Frequency       ×
-```
-
-另一个样本可能：
-
-```text
-Language        ×
-Exterior Cam    ✓
-Right Wrist     ×
-Left Wrist      ✓
-State           ✓
-Frequency       ✓
-```
-
-这样迫使模型学习：
-
-$$
-\boxed{
-\text{Multiple Redundant Cues}
-}
-$$
-
-核心作用：
-
-$$
-\boxed{
-\text{Prevent Shortcut Learning}
-}
-$$
-
----
-
-## 17. Diffusion：RDT 直接预测 Clean Action
-
-真实动作块：
-
-$$
-A_0
-=
-[a_t,\ldots,a_{t+63}]
-$$
-
-其中：
-
-$$
-A_0
-\in
-\mathbb R^{64\times128}
-$$
-
-随机采样 diffusion timestep：
-
-$$
-k
-\sim
-\operatorname{Uniform}\{1,\ldots,K\}
-$$
-
-采样高斯噪声：
-
-$$
-\epsilon
-\sim
-\mathcal N(0,I)
-$$
-
-其中：
-
-$$
-\epsilon
-\in
-\mathbb R^{64\times128}
-$$
-
-前向加噪：
-
-$$
-\boxed{
-A_k
-=
-\sqrt{\bar\alpha_k}A_0
-+
-\sqrt{1-\bar\alpha_k}\epsilon
-}
-$$
-
-因此：
-
-$$
-A_k
-\in
-\mathbb R^{64\times128}
-$$
-
-shape 没有改变。
-
-只是：
-
-$$
-\boxed{
-\text{Clean Action}
-\rightarrow
-\text{Noisy Action}
-}
-$$
-
-RDT 接收：
-
-$$
-(l,I,z_t,c,A_k,k)
-$$
-
-预测：
-
-$$
-\boxed{
-\hat A_0
-=
-f_\theta(l,I,z_t,c,A_k,k)
-}
-$$
-
-而不是预测：
-
-$$
-\epsilon
-$$
-
-所以训练目标：
-
-$$
-\boxed{
-\mathcal L
-=
-\|A_0-\hat A_0\|_2^2
-}
-$$
-
-最值得和 Octo 区分：
-
-$$
-\boxed{
-Octo:
-A_k
-\rightarrow
-\hat\epsilon
-}
-$$
-
-而：
-
-$$
-\boxed{
-RDT:
-A_k
-\rightarrow
-\hat A_0
-}
-$$
-
----
-
-## 18. 为什么说 RDT Transformer 本身就是 Denoiser
-
-Octo 可以抽象成：
-
-```text
-Observation
-    │
-    ▼
-Transformer
-    │
-    ▼
-Condition Representation
-    │
-    ▼
-Small Diffusion Head
-    │
-    ▼
-Action Denoising
-```
-
-也就是说 Transformer 主要：
-
-$$
-\boxed{\text{Encode Observation}}
-$$
-
-真正 iterative diffusion 主要发生在小 Action Head 中。
-
-RDT 则是：
-
-```text
-Noisy Action A_k
-      │
-      ▼
-RDT Transformer
-      │
-      ▼
-Predicted Clean Action Â_0
-```
-
-因为：
-
-$$
-A_k
-$$
-
-本身就是 Transformer Main Sequence 的一部分。
-
-因此：
-
-$$
-\boxed{
-\text{RDT Transformer 本身就是 Diffusion Denoiser}
-}
-$$
-
----
-
-## 19. 完整数据符号流程：训练
-
-下面用一个 batch 的数据完整走一次。
-
-设：
-
-$$
-B=\text{Batch Size}
-$$
-
-$$
-H_A=64
-$$
-
-$$
-D_R=128
-$$
-
-$$
-D=2048
-$$
-
-$$
-N_H=32
-$$
-
----
-
-### 19.1 Step 0：原始机器人轨迹
-
-对于 batch 中第 $b$ 个样本，原始数据：
-
-$$
-\mathcal D^{(b)}
-=
-(
-l^{(b)},
-I^{(b)},
-s_t^{(b)},
-c^{(b)},
-A_{\text{raw}}^{(b)}
-)
-$$
-
-其中：
-
-语言：
-
-$$
-l^{(b)}
-=
-\text{String}
-$$
-
-图像：
-
-$$
-I^{(b)}
-=
-\{
-I_{t-1}^{ext},
-I_{t-1}^{rw},
-I_{t-1}^{lw},
-I_t^{ext},
-I_t^{rw},
-I_t^{lw}
-\}
-$$
-
-原始机器人状态：
-
-$$
-s_t^{(b)}
-\in
-\mathbb R^{d_s^{(r)}}
-$$
-
-原始未来动作：
-
-$$
-A_{\text{raw}}^{(b)}
-\in
-\mathbb R^{64\times d_a^{(r)}}
-$$
-
-控制频率：
-
-$$
-c^{(b)}
-\in
-\mathbb R
-$$
-
-这里不同机器人：
-
-$$
-d_s^{(r)}
-$$
-
-和：
-
-$$
-d_a^{(r)}
-$$
-
-可以不同。
-
----
-
-### 19.2 Step 1：映射到统一 128D 物理空间
-
-根据机器人类型 $r$ 的物理映射：
-
-$$
-U_r
-$$
-
-状态：
-
-$$
-s_t^{(r)}
-\in
-\mathbb R^{d_s^{(r)}}
-$$
-
-变成：
-
-$$
-\boxed{
-z_t
-=
-U_r(s_t^{(r)})
-\in
-\mathbb R^{128}
-}
-$$
-
-动作：
-
-$$
-A_{\text{raw}}
-\in
-\mathbb R^{64\times d_a^{(r)}}
-$$
-
-变成：
-
-$$
-\boxed{
-A_0
-=
-U_r(A_{\text{raw}})
-\in
-\mathbb R^{64\times128}
-}
-$$
-
-同时产生：
-
-$$
-M_z\in\{0,1\}^{128}
-$$
-
-以及：
-
-$$
-M_A
-\in
-\{0,1\}^{64\times128}
-$$
-
-表示哪些统一物理维度在当前机器人中有效。
-
-batch 后：
-
-$$
-Z
-\in
-\mathbb R^{B\times128}
-$$
-
-$$
-A_0
-\in
-\mathbb R^{B\times64\times128}
-$$
-
----
-
-### 19.3 Step 2：Independent Random Masking
-
-训练时对：
-
-$$
-Language
-$$
-
-$$
-Camera_i
-$$
-
-$$
-State
-$$
-
-$$
-Control\ Frequency
-$$
-
-等条件进行独立随机 Mask。
-
-形式上可以写成：
-
-$$
-\tilde C_j
-=
-m_jC_j
-$$
-
-其中：
-
-$$
-m_j\in\{0,1\}
-$$
-
-因此输入从：
-
-$$
-(l,I,z_t,c)
-$$
-
-变成：
-
-$$
-(\tilde l,\tilde I,\tilde z_t,\tilde c)
-$$
-
-数据 shape 基本不改变，只改变：
-
-$$
-\boxed{\text{哪些条件有效}}
-$$
-
----
-
-### 19.4 Step 3：构造真实 Action Chunk
-
-从 trajectory 中取未来 $64$ 步：
-
-$$
-A_0
-=
-[a_t,a_{t+1},\ldots,a_{t+63}]
-$$
-
-每个 action 已经在统一空间：
-
-$$
-a_i\in\mathbb R^{128}
-$$
-
-所以：
-
-$$
-\boxed{
-A_0
-\in
-\mathbb R^{B\times64\times128}
-}
-$$
-
-这是监督标签。
-
----
-
-### 19.5 Step 4：采样 Diffusion Timestep
-
-每个 sample 随机：
-
-$$
-k
-\sim
-U\{1,\ldots,K\}
-$$
-
-batch：
-
-$$
-k
-\in
-\mathbb R^{B}
-$$
-
----
-
-### 19.6 Step 5：采样噪声
-
-生成：
-
-$$
-\epsilon
-\sim
-\mathcal N(0,I)
-$$
-
-shape：
-
-$$
-\boxed{
-\epsilon
-\in
-\mathbb R^{B\times64\times128}
-}
-$$
-
-和 $A_0$ 完全相同。
-
----
-
-### 19.7 Step 6：Action 加噪
-
-根据 $k$：
-
-$$
-A_k
-=
-\sqrt{\bar\alpha_k}A_0
-+
-\sqrt{1-\bar\alpha_k}\epsilon
-$$
-
-因此：
-
-$$
-A_0:
-B\times64\times128
-$$
-
-经过 diffusion：
-
-$$
-\Downarrow
-$$
-
-$$
-A_k:
-B\times64\times128
-$$
-
-shape 不变。
-
-改变的是：
-
-$$
-\boxed{
-\text{Data Distribution}
-}
-$$
-
-从干净专家动作变成带噪动作。
-
----
-
-### 19.8 Step 7：编码 Diffusion Timestep
-
-输入：
-
-$$
-k
-\in
-\mathbb R^B
-$$
-
-经过：
-
-$$
-k
-\xrightarrow{\text{Sinusoidal Embedding}}
-E_k
-\xrightarrow{\text{MLP}}
-T_k
-$$
-
-得到：
-
-$$
-\boxed{
-T_k
-\in
-\mathbb R^{B\times1\times2048}
-}
-$$
-
----
-
-### 19.9 Step 8：编码 Control Frequency
-
-输入：
-
-$$
-c
-\in
-\mathbb R^B
-$$
-
-经过：
-
-$$
-c
-\xrightarrow{\text{Sinusoidal/Fourier Embedding}}
-E_c
-\xrightarrow{\text{MLP}}
-T_c
-$$
-
-得到：
-
-$$
-\boxed{
-T_c
-\in
-\mathbb R^{B\times1\times2048}
-}
-$$
-
----
-
-### 19.10 Step 9：编码 Robot State
-
-输入：
-
-$$
-Z
-\in
-\mathbb R^{B\times128}
-$$
-
-经过 State Adapter：
-
-$$
-Z
-\xrightarrow{\text{MLP}}
-T_z
-$$
-
-得到：
-
-$$
-\boxed{
-T_z
-\in
-\mathbb R^{B\times1\times2048}
-}
-$$
-
----
-
-### 19.11 Step 10：编码 Noisy Action
-
-输入：
-
-$$
-A_k
-\in
-\mathbb R^{B\times64\times128}
-$$
-
-对每个 future action：
-
-$$
-a_i^k
-\in
-\mathbb R^{128}
-$$
-
-应用 MLP：
-
-$$
-a_i^k
-\xrightarrow{\text{MLP}}
-T_{a_i}
-\in
-\mathbb R^{2048}
-$$
-
-于是：
-
-$$
-\boxed{
-T_A
-\in
-\mathbb R^{B\times64\times2048}
-}
-$$
-
-格式变化：
-
-$$
-B\times64\times128
-$$
-
-$$
-\Downarrow
-$$
-
-$$
-B\times64\times2048
-$$
-
----
-
-### 19.12 Step 11：构造 Main Sequence
-
-将：
 
 $$
 T_k
-$$
-
-$$
-T_c
-$$
-
-$$
-T_z
-$$
-
-$$
-T_A
+\in
+\mathbb R^{1\times2048}
 $$
 
 沿 sequence dimension concat：
 
 $$
-X_0
+X^{(0)}
 =
-[
-T_k;
-T_c;
-T_z;
-T_A
-]
+\operatorname{Concat}
+(
+T_z,
+T_A,
+T_c,
+T_k
+)
 $$
 
-shape：
+因此 sequence length：
 
 $$
-B\times
-(1+1+1+64)
-\times2048
+1+64+1+1
+=
+67
 $$
 
-即：
+最终：
 
 $$
 \boxed{
-X_0
+X^{(0)}
 \in
-\mathbb R^{B\times67\times2048}
+\mathbb R^{67\times2048}
 }
 $$
 
-然后：
+论文只要求这四类 low-dimensional token 沿 length dimension 组成长度：
 
 $$
-X_0
+1+T_a+1+1
+$$
+
+的序列。
+
+可以概念化理解成：
+
+```text
+[Diffusion Step]
+[Control Frequency]
+[Robot State]
+[Noisy Action 1]
+[Noisy Action 2]
+...
+[Noisy Action 64]
+```
+
+然后加入 positional embedding：
+
+$$
+X^{(0)}
 \leftarrow
-X_0+P
+X^{(0)}+P
 $$
 
-position embedding 后：
+其中 position embedding 同时帮助模型区分：
+
+$$
+\text{State / Action / Frequency / Diffusion Step}
+$$
+
+以及 Action Chunk 内部的 temporal position。
+
+这条：
+
+$$
+67\times2048
+$$
+
+序列就是：
 
 $$
 \boxed{
-B\times67\times2048
+\text{RDT Transformer 的 Main Sequence}
+}
+$$
+
+最重要的一点是：
+
+$$
+\boxed{
+\text{Language 和 Image 不在这里与 Main Sequence 直接 concat}
+}
+$$
+
+它们属于：
+
+$$
+\boxed{
+\text{Condition Sequence}
 }
 $$
 
 ---
 
-### 19.13 Step 12：编码 Language Condition
+### 1.6 Language Condition
 
-语言 tokenizer 后：
-
-$$
-W
-\in
-\mathbb N^{B\times N_L}
-$$
-
-进入冻结 T5：
+语言指令：
 
 $$
-W
-\xrightarrow{\text{T5}}
+\ell
+$$
+
+首先进入冻结的：
+
+$$
+\boxed{
+\text{T5-XXL}
+}
+$$
+
+得到：
+
+$$
 H_L
+=
+\operatorname{T5}(\ell)
 $$
+
+论文中的 language token dimension：
+
+$$
+\boxed{
+4096
+}
+$$
+
+所以：
 
 $$
 H_L
 \in
-\mathbb R^{B\times N_L\times4096}
+\mathbb R^{N_L\times4096}
 $$
 
-Language Adapter：
+T5-XXL 参数：
+
+$$
+\boxed{
+\text{Frozen}
+}
+$$
+
+然后经过：
+
+$$
+\boxed{
+2\text{-layer MLP Adapter}
+}
+$$
+
+投影到 RDT hidden dimension：
 
 $$
 4096
@@ -2306,63 +1168,113 @@ $$
 \boxed{
 C_L
 \in
-\mathbb R^{B\times N_L\times2048}
+\mathbb R^{N_L\times2048}
 }
 $$
+
+batch 中为了统一长度可能存在 PAD token，因此 language attention 中使用：
+
+$$
+\boxed{
+\text{Language Attention Mask}
+}
+$$
+
+避免读取 padding。
 
 ---
 
-### 19.14 Step 13：编码 Image Condition
+### 1.7 Image Condition
 
-假设：
-
-$$
-T_o=2
-$$
+RDT 配置：
 
 $$
-N_c=3
+T_{\mathrm{img}}=2
 $$
 
-总共：
-
 $$
-N_{img}=6
+N_{\mathrm{cam}}=3
 $$
 
-张图。
-
-原始输入可以抽象为：
+所以最多：
 
 $$
-I
-\in
-\mathbb R^{
-B\times6\times H_I\times W_I\times3
+6
+$$
+
+张 RGB image：
+
+```text
+t-1:
+    Exterior
+    Right Wrist
+    Left Wrist
+
+t:
+    Exterior
+    Right Wrist
+    Left Wrist
+```
+
+每张图首先经过冻结的：
+
+$$
+\boxed{
+\text{SigLIP}
 }
 $$
 
-每张图经过 SigLIP：
+设每张图产生：
 
 $$
-I_j
-\rightarrow
-V_j
-\in
-\mathbb R^{N_P\times1152}
+N_P
 $$
 
-全部图像展开：
+个 patch token。
+
+SigLIP 的 image token dimension：
 
 $$
-V
-\in
-\mathbb R^{
-B\times6N_P\times1152
+\boxed{
+1152
 }
 $$
 
-然后 Image Adapter：
+则所有视觉表示可以写成：
+
+$$
+H_I
+\in
+\mathbb R^{
+T_{\mathrm{img}}
+\times
+N_{\mathrm{cam}}
+\times
+N_P
+\times
+1152
+}
+$$
+
+即：
+
+$$
+H_I
+\in
+\mathbb R^{
+2\times3\times N_P\times1152
+}
+$$
+
+然后通过：
+
+$$
+\boxed{
+2\text{-layer MLP Adapter}
+}
+$$
+
+将：
 
 $$
 1152
@@ -2373,721 +1285,1398 @@ $$
 得到：
 
 $$
-\boxed{
 C_I
 \in
-\mathbb R^{B\times6N_P\times2048}
+\mathbb R^{
+2\times3\times N_P\times2048
+}
+$$
+
+随后可以 flatten 为 Cross-Attention 所使用的 condition sequence。
+
+---
+
+##### Multi-Dimensional Positional Embedding
+
+单纯 flatten：
+
+$$
+6N_P
+$$
+
+个 visual token 会丢失：
+
+*> 这个 patch 来自哪个时间？哪个摄像头？图像中的哪个 spatial location？*
+
+所以 RDT 使用 multi-dimensional positional encoding：
+
+$$
+\boxed{
+(
+T_{\mathrm{img}},
+N_{\mathrm{cam}},
+N_P,
+D
+)
+}
+$$
+
+即 position information 同时编码：
+
+$$
+\boxed{
+\text{Time}
++
+\text{Camera View}
++
+\text{Patch Position}
+}
+$$
+
+使模型能够区分：
+
+$$
+X_{t-1}^{\text{Exterior}}
+$$
+
+和：
+
+$$
+X_t^{\text{Right Wrist}}
+$$
+
+而不是把所有视觉 token 当作同一种输入。
+
+---
+
+### 1.8 RDT Transformer：28 层内部到底发生什么？
+
+RDT-1B 配置：
+
+$$
+\boxed{
+28\text{ Transformer Layers}
+}
+$$
+
+hidden dimension：
+
+$$
+\boxed{
+D=2048
+}
+$$
+
+attention heads：
+
+$$
+\boxed{
+32
+}
+$$
+
+总参数：
+
+$$
+\boxed{
+1.2B
+}
+$$
+
+因此每一个 attention head 的 dimension：
+
+$$
+d_h
+=
+\frac{2048}{32}
+=
+64
+$$
+
+RDT block 可以概念化为：
+
+```text
+Main Sequence X
+
+      │
+      ▼
+   RMSNorm
+      │
+      ▼
+Self-Attention
+      │
+   Residual
+      │
+      ▼
+   RMSNorm
+      │
+      ▼
+Cross-Attention
+      │
+   Residual
+      │
+      ▼
+   RMSNorm
+      │
+      ▼
+     FFN
+      │
+   Residual
+      │
+      ▼
+Next Layer
+```
+
+而 RDT 对原始 DiT 做了三个最关键的修改：
+
+$$
+\boxed{
+\text{QKNorm + RMSNorm}
+}
+$$
+
+$$
+\boxed{
+\text{MLP Decoder}
+}
+$$
+
+$$
+\boxed{
+\text{Alternating Condition Injection}
 }
 $$
 
 ---
 
-### 19.15 Step 14：进入第 1 个 RDT Block
+### 1.9 Self-Attention：Action Chunk 内部怎么交互？
 
 当前：
 
 $$
-X_0
+X
 \in
-\mathbb R^{B\times67\times2048}
+\mathbb R^{67\times2048}
 $$
 
-首先：
+先做：
 
 $$
-\bar X_0
+\bar X
 =
-\operatorname{RMSNorm}(X_0)
-$$
-
-shape：
-
-$$
-B\times67\times2048
-$$
-
----
-
-### 19.16 Step 15：Self-Attention
-
-投影：
-
-$$
-Q=XW_Q
-$$
-
-$$
-K=XW_K
-$$
-
-$$
-V=XW_V
-$$
-
-拆成 $32$ heads：
-
-$$
-Q,K,V
-\in
-\mathbb R^{
-B\times32\times67\times64
-}
-$$
-
-QK-Norm：
-
-$$
-Q\leftarrow RMSNorm(Q)
-$$
-
-$$
-K\leftarrow RMSNorm(K)
-$$
-
-计算：
-
-$$
-S
-=
-\frac{QK^\top}{\sqrt{64}}
-$$
-
-其中：
-
-$$
-S
-\in
-\mathbb R^{
-B\times32\times67\times67
-}
-$$
-
-Softmax：
-
-$$
-P
-=
-\operatorname{softmax}(S)
-$$
-
-再：
-
-$$
-H
-=
-PV
-$$
-
-得到：
-
-$$
-H
-\in
-\mathbb R^{
-B\times32\times67\times64
-}
-$$
-
-合并 heads：
-
-$$
-H_{\text{self}}
-\in
-\mathbb R^{B\times67\times2048}
-$$
-
-Residual：
-
-$$
-X'
-=
-X_0+H_{\text{self}}
-$$
-
-最终：
-
-$$
-\boxed{
-X'
-\in
-\mathbb R^{B\times67\times2048}
-}
-$$
-
-此时每个 Action Token 已经融合：
-
-$$
-[k,c,z,a_1,\ldots,a_{64}]
-$$
-
-的信息。
-
----
-
-### 19.17 Step 16：Language Cross-Attention
-
-如果当前 Block 使用 Language：
-
-$$
-C=C_L
-$$
-
-Main Sequence 产生：
-
-$$
-Q
-\in
-\mathbb R^{
-B\times32\times67\times64
-}
-$$
-
-Language Condition 产生：
-
-$$
-K_L,V_L
-\in
-\mathbb R^{
-B\times32\times N_L\times64
-}
-$$
-
-Attention Score：
-
-$$
-S_L
-=
-QK_L^\top
-$$
-
-shape：
-
-$$
-\boxed{
-B\times32\times67\times N_L
-}
-$$
-
-意味着：
-
-> 67 个 Main Sequence token 分别查询语言中的 $N_L$ 个 token。
-
-得到：
-
-$$
-H_{\text{cross}}
-\in
-\mathbb R^{B\times67\times2048}
+\operatorname{RMSNorm}(X)
 $$
 
 然后：
 
 $$
-X''
-=
-X'
-+
-H_{\text{cross}}
+Q=\bar XW_Q
 $$
 
----
-
-### 19.18 Step 17：FFN
-
-先：
+$$
+K=\bar XW_K
+$$
 
 $$
-\bar X''
+V=\bar XW_V
+$$
+
+RDT 在 attention 中进一步加入：
+
+$$
+\boxed{
+\text{QKNorm}
+}
+$$
+
+也就是在计算 attention score 前对：
+
+$$
+Q,\ K
+$$
+
+进行 normalization。
+
+概念上：
+
+$$
+\hat Q
 =
-RMSNorm(X'')
+\operatorname{Norm}(Q)
+$$
+
+$$
+\hat K
+=
+\operatorname{Norm}(K)
 $$
 
 然后：
 
 $$
-H_{\text{FFN}}
+H_{\mathrm{self}}
 =
-FFN(\bar X'')
+\operatorname{softmax}
+\left(
+\frac{
+\hat Q\hat K^\top
+}{
+\sqrt{d_h}
+}
+\right)V
 $$
 
-最后：
+再 residual：
 
 $$
-X_1
+X'
 =
-X''
-+
-H_{\text{FFN}}
+X+H_{\mathrm{self}}
 $$
 
-shape 始终：
+这里 Self-Attention 做的事情非常关键：
 
 $$
 \boxed{
-B\times67\times2048
+a_i
+\leftrightarrow
+a_j
 }
 $$
 
----
+未来 64 个 noisy action token 可以联合建模。
 
-### 19.19 Step 18：继续 28 层
-
-因此：
-
-```text
-X_0
-
-↓ Block 1
-Self-Attention
-Language Cross-Attention
-FFN
-
-↓ Block 2
-Self-Attention
-Image Cross-Attention
-FFN
-
-↓ Block 3
-Self-Attention
-Language Cross-Attention
-FFN
-
-↓ Block 4
-Self-Attention
-Image Cross-Attention
-FFN
-
-...
-
-↓ Block 28
-Self-Attention
-Image Cross-Attention
-FFN
-```
-
-整个过程中：
+所以 RDT 并不是：
 
 $$
-X_l
-\in
-\mathbb R^{B\times67\times2048}
+a_t
+\rightarrow
+a_{t+1}
+\rightarrow
+a_{t+2}
 $$
 
-sequence length 和 hidden dimension 都不改变。
+逐 token autoregressive generation。
 
-改变的是：
+而是：
 
 $$
 \boxed{
-\text{每个 Token 内部包含的信息}
+\text{整段 Action Chunk 作为一个 trajectory 共同 denoise}
 }
 $$
 
-随着层数增加，Action Token 逐渐融合：
+这使模型可以学习：
 
 $$
-\text{Diffusion Time}
-+
-\text{Frequency}
-+
-\text{State}
-+
-\text{Other Actions}
-+
-\text{Language}
-+
-\text{Vision}
-$$
-
----
-
-### 19.20 Step 19：最终 RMSNorm
-
-28 层之后：
-
-$$
-X_{28}
-\in
-\mathbb R^{B\times67\times2048}
-$$
-
-经过：
-
-$$
-\tilde X
-=
-RMSNorm(X_{28})
-$$
-
-shape：
-
-$$
-B\times67\times2048
-$$
-
----
-
-### 19.21 Step 20：MLP Decoder
-
-每一个 token feature：
-
-$$
-x_i
-\in
-\mathbb R^{2048}
-$$
-
-经过 Decoder：
-
-$$
-x_i
-\xrightarrow{\text{MLP Decoder}}
-y_i
-$$
-
-映射回统一 action dimension。
-
-只需要最后 $64$ 个 Action Token 对应的输出：
-
-$$
-[
-y_4,\ldots,y_{67}
-]
-$$
-
-得到：
-
-$$
-\boxed{
-\hat A_0
-\in
-\mathbb R^{B\times64\times128}
-}
-$$
-
-所以：
-
-$$
-B\times67\times2048
-$$
-
-经过 Decoder 并选 Action Tokens：
-
-$$
-\Downarrow
-$$
-
-$$
-\boxed{
-B\times64\times128
-}
-$$
-
----
-
-### 19.22 Step 21：计算 Loss
-
-真实动作：
-
-$$
-A_0
-\in
-\mathbb R^{B\times64\times128}
-$$
-
-预测：
-
-$$
-\hat A_0
-\in
-\mathbb R^{B\times64\times128}
-$$
-
-计算：
-
-$$
-\boxed{
-\mathcal L
-=
-\|A_0-\hat A_0\|_2^2
-}
-$$
-
-对不同机器人不存在的 unified dimensions，通过有效维度 mask 保持其无效语义。
-
-最后：
-
-```text
-Loss
- ↓
-Backpropagation
- ↓
-RDT Transformer
-Adapters
-State / Action Encoder
-MLP Decoder
-```
-
-而：
-
-```text
-T5-XXL   Frozen
-SigLIP   Frozen
-```
-
----
-
-## 20. 训练流程压缩成一条数据链
-
-完整训练流程：
-
-```text
-Raw Multi-Robot Trajectory
-(l, images, raw_state, raw_actions, frequency)
-
-        │
-        ▼
-
-Robot-specific physical mapping
-
-raw_state
-    ↓
-state ∈ R^128
-
-raw_action
-    ↓
-action ∈ R^128
-
-        │
-        ▼
-
-Future Action Chunk
-
-A_0
-shape:
-[B, 64, 128]
-
-        │
-        ├──────────────────────────────┐
-        │                              │
-        ▼                              │
-sample k                             Label
-        │                              │
-sample ε                              │
-        │                              │
-        ▼                              │
-
-A_k = √ᾱ_k A_0 + √(1-ᾱ_k) ε          │
-                                         │
-shape: [B,64,128]                       │
-        │                               │
-        ▼                               │
-
-Action MLP                              │
-        │                               │
-        ▼                               │
-[B,64,2048]                            │
-                                        │
-State [B,128]                           │
-  ↓ State MLP                           │
-[B,1,2048]                             │
-                                        │
-k                                      │
- ↓ SinCos + MLP                         │
-[B,1,2048]                             │
-                                        │
-frequency                              │
- ↓ SinCos + MLP                         │
-[B,1,2048]                             │
-                                        │
-        └────────── concat ─────────────┘
-                    │
-                    ▼
-
-Main Sequence
-[k][freq][state][a_1]...[a_64]
-
-shape:
-[B,67,2048]
-
-                    │
-                    ▼
-
-              RDT Block ×28
-                    │
-     ┌──────────────┴───────────────┐
-     │                              │
-     ▼                              ▼
-Language                         Images
-  ↓                               ↓
-T5                              SigLIP
-  ↓                               ↓
-[B,N_L,4096]                 [B,6N_P,1152]
-  ↓                               ↓
-Adapter                          Adapter
-  ↓                               ↓
-[B,N_L,2048]                 [B,6N_P,2048]
-     │                              │
-     └──── alternating Cross-Attn ──┘
-
-                    │
-                    ▼
-
-             [B,67,2048]
-
-                    │
-                    ▼
-
-               RMSNorm
-
-                    │
-                    ▼
-
-              MLP Decoder
-
-                    │
-                    ▼
-
-take Action Tokens only
-
-                    │
-                    ▼
-
-Predicted Clean Action
-
-Â_0
-shape:
-[B,64,128]
-
-                    │
-                    ▼
-
-L = ||A_0 - Â_0||²
-```
-
----
-
-## 21. 完整数据符号流程：推理
-
-训练结束以后，真实未来动作：
-
-$$
-A_0
-$$
-
-当然不存在。
-
-因此推理必须从随机噪声开始。
-
----
-
-### 21.1 Step 1：获得当前 Observation
-
-机器人当前时刻获得：
-
-$$
-o_t
-=
-(I_t,z_t)
-$$
-
-并拥有任务：
-
-$$
-l
+\text{左手 trajectory}
+\leftrightarrow
+\text{右手 trajectory}
 $$
 
 以及：
 
 $$
-c
+a_t
+\leftrightarrow
+a_{t+40}
 $$
 
-所以条件是：
+这样的长时间 coordination。
+
+---
+
+### 1.10 为什么使用 RMSNorm + QKNorm？
+
+Robot physical quantities 的数值范围可能非常不稳定。
+
+例如：
 
 $$
-(l,I,z_t,c)
+\text{position}
+$$
+
+$$
+\text{velocity}
+$$
+
+$$
+\text{joint angle}
+$$
+
+$$
+\text{EEF pose}
+$$
+
+可能具有完全不同的尺度，而且传感器还可能出现 outlier。
+
+这会造成：
+
+$$
+QK^\top
+$$
+
+过大，从而导致：
+
+$$
+\boxed{
+\text{Gradient Instability / Numerical Overflow}
+}
+$$
+
+因此 RDT 使用：
+
+$$
+\boxed{
+\text{QKNorm}
+}
+$$
+
+稳定 attention score。
+
+同时把原始 DiT 中的：
+
+$$
+\operatorname{LayerNorm}
+$$
+
+替换成：
+
+$$
+\boxed{
+\operatorname{RMSNorm}
+}
+$$
+
+RDT 的解释是：
+
+LayerNorm 包含 centering：
+
+$$
+x
+\rightarrow
+x-\mu
+$$
+
+而机器人动作本质上是一类 time-series physical quantity。
+
+centering 可能产生：
+
+$$
+\text{token shift}
+$$
+
+和：
+
+$$
+\text{attention shift}
+$$
+
+破坏时间序列中的某些对称结构。
+
+RMSNorm 不进行 centering，因此更加适合这种输入。
+
+---
+
+### 1.11 Cross-Attention：Action 怎么读取 Language / Image？
+
+经过 Self-Attention：
+
+$$
+X'
+\in
+\mathbb R^{67\times2048}
+$$
+
+Main Sequence 作为 Query：
+
+$$
+Q
+=
+X'W_Q
+$$
+
+Condition 作为：
+
+$$
+K,V
+$$
+
+因此：
+
+$$
+\boxed{
+Q=\text{Robot / Action Main Sequence}
+}
+$$
+
+而：
+
+$$
+\boxed{
+K,V=\text{Language 或 Image Condition}
+}
+$$
+
+假设当前 layer 注入 Language：
+
+$$
+K_L=C_LW_K
+$$
+
+$$
+V_L=C_LW_V
+$$
+
+则：
+
+$$
+H_{\mathrm{cross}}
+=
+\operatorname{softmax}
+\left(
+\frac{
+QK_L^\top
+}{
+\sqrt{d_h}
+}
+\right)
+V_L
+$$
+
+然后：
+
+$$
+X''
+=
+X'
++
+H_{\mathrm{cross}}
+$$
+
+可以把它理解成：
+
+*> 每一个 state/action token 都在主动询问语言：*
+
+*> “为了决定我这一时刻应该怎么运动，任务指令中哪些信息与我有关？”*
+
+如果当前 layer 注入视觉：
+
+$$
+K_I=C_IW_K
+$$
+
+$$
+V_I=C_IW_V
+$$
+
+那么 action token 就是在询问：
+
+*> “为了决定这个动作，我应该关注哪个 camera、哪个时间、哪个 image patch？”*
+
+因此 RDT 的信息方向可以理解成：
+
+$$
+\boxed{
+\text{Language / Image}
+\rightarrow
+\text{Action Representation}
+}
 $$
 
 ---
 
-### 21.2 Step 2：编码固定条件
+### 1.12 Alternating Condition Injection
 
-Language：
-
-$$
-l
-\rightarrow
-T5
-\rightarrow
-Adapter
-\rightarrow
-C_L
-$$
+一个直接方案可能是：
 
 $$
-C_L
-\in
-\mathbb R^{B\times N_L\times2048}
+C
+=
+[C_L;C_I]
 $$
 
-Image：
+然后每一层：
 
 $$
-I
-\rightarrow
-SigLIP
-\rightarrow
-Adapter
-\rightarrow
-C_I
+\operatorname{CrossAttn}(X,C)
 $$
 
-$$
-C_I
-\in
-\mathbb R^{B\times6N_P\times2048}
-$$
-
-State：
+但问题是：
 
 $$
-z_t
-\rightarrow
-MLP
-\rightarrow
-T_z
+N_I
+\gg
+N_L
 $$
 
-$$
-T_z
-\in
-\mathbb R^{B\times1\times2048}
-$$
+视觉 patch token 通常远多于语言 token。
 
-Frequency：
+如果直接一起做 attention：
 
 $$
-c
-\rightarrow
-Embedding+MLP
-\rightarrow
-T_c
+\boxed{
+\text{Visual Information 容易压过 Language Information}
+}
 $$
 
+模型可能更愿意：
+
+*> 看图猜动作。*
+
+而不是：
+
+*> 真正理解语言指定的是左手、右手、哪个物体、什么操作方式。*
+
+所以 RDT 提出：
+
 $$
-T_c
-\in
-\mathbb R^{B\times1\times2048}
+\boxed{
+\text{Alternating Condition Injection}
+}
 $$
 
-这些条件描述当前机器人和任务。
+即 consecutive Transformer layers 交替注入：
+
+$$
+\text{Language}
+$$
+
+和：
+
+$$
+\text{Image}
+$$
+
+可以概念化成：
+
+```text
+Layer i     → Language Cross-Attention
+Layer i+1   → Image Cross-Attention
+Layer i+2   → Language Cross-Attention
+Layer i+3   → Image Cross-Attention
+...
+```
+
+因此：
+
+$$
+\boxed{
+C^{(l)}
+=
+\begin{cases}
+C_L,&\text{Language-conditioned layer}\\
+C_I,&\text{Image-conditioned layer}
+\end{cases}
+}
+$$
+
+注意：
+
+论文明确的是：
+
+$$
+\boxed{
+\text{successive layers 交替注入 Language / Image}
+}
+$$
+
+核心并不是必须记住：
+
+*> 第一层究竟先 Language 还是先 Image。*
+
+真正重要的是：
+
+$$
+\boxed{
+\text{不要在同一层让大量 Image Token 淹没 Language Token}
+}
+$$
 
 ---
 
-### 21.3 Step 3：初始化纯高斯 Action
+### 1.13 Independent Random Masking
 
-没有真实动作，所以直接：
+还有一个问题。
+
+Exterior camera 通常能看到：
+
+$$
+\boxed{
+\text{最多的全局信息}
+}
+$$
+
+如果模型每次都有 exterior camera，它可能学出 shortcut：
+
+*> 只看 exterior camera 就行，没必要理解 wrist camera / language / other input。*
+
+所以训练期间：
+
+$$
+\boxed{
+\text{各个 multimodal input 独立以 }10\%\text{ 概率被 mask}
+}
+$$
+
+即训练时可能出现：
+
+```text
+Language        ✓
+Exterior Cam    ×
+Right Wrist     ✓
+Left Wrist      ✓
+...
+```
+
+下一条数据又可能变成：
+
+```text
+Language        ×
+Exterior Cam    ✓
+Right Wrist     ×
+Left Wrist      ✓
+...
+```
+
+目的不是做 diffusion noise，而是：
+
+$$
+\boxed{
+\text{Prevent Shortcut Learning}
+}
+$$
+
+迫使模型利用不同的信息来源。
+
+---
+
+### 1.14 FFN 在做什么？
+
+Cross-Attention 完成以后：
+
+$$
+X''
+\in
+\mathbb R^{67\times2048}
+$$
+
+进入：
+
+$$
+\bar X''
+=
+\operatorname{RMSNorm}(X'')
+$$
+
+然后：
+
+$$
+H_{\mathrm{FFN}}
+=
+\operatorname{FFN}(\bar X'')
+$$
+
+Residual：
+
+$$
+X^{\mathrm{next}}
+=
+X''
++
+H_{\mathrm{FFN}}
+$$
+
+Attention 负责：
+
+$$
+\boxed{
+\text{Token 与 Token 之间的信息交换}
+}
+$$
+
+FFN 负责：
+
+$$
+\boxed{
+\text{每一个 Token 内部 Feature 的非线性变换}
+}
+$$
+
+经过：
+
+$$
+28
+$$
+
+层之后：
+
+$$
+X^{(28)}
+\in
+\mathbb R^{67\times2048}
+$$
+
+---
+
+### 1.15 MLP Decoder：为什么不是 Linear Projection？
+
+普通 Transformer 最后经常使用：
+
+$$
+h
+\xrightarrow{W}
+y
+$$
+
+即 linear projection。
+
+但机器人 dynamics 往往具有：
+
+$$
+\boxed{
+\text{strong nonlinearity}
+}
+$$
+
+例如：
+
+$$
+\text{contact}
+$$
+
+$$
+\text{collision}
+$$
+
+$$
+\text{friction}
+$$
+
+$$
+\text{joint constraint}
+$$
+
+都会造成非线性变化。
+
+因此 RDT 不使用简单 linear decoder，而使用：
+
+$$
+\boxed{
+\text{MLP Decoder}
+}
+$$
+
+经过最后的 normalization：
+
+$$
+X^{(28)}
+\xrightarrow{\text{Norm}}
+\bar X
+$$
+
+再取与 Action Chunk 对应的 representation，经过：
+
+$$
+\operatorname{MLPDecoder}
+$$
+
+得到：
+
+$$
+\boxed{
+\hat A_0
+\in
+\mathbb R^{64\times128}
+}
+$$
+
+也就是：
+
+$$
+\boxed{
+\text{Predicted Clean Action Chunk}
+}
+$$
+
+所以整个 denoising network 本质上是：
+
+$$
+\boxed{
+f_\theta
+(
+\ell,
+o_t,
+\tilde A_k,
+k
+)
+=
+\hat A_0
+}
+$$
+
+---
+
+### 1.16 RDT 的 Diffusion Loss 到底在训练什么？
+
+真实动作：
+
+$$
+A_0
+$$
+
+经过 forward diffusion：
+
+$$
+A_0
+\rightarrow
+\tilde A_k
+$$
+
+RDT：
+
+$$
+\tilde A_k
+\xrightarrow[
+\ell,o_t,k
+]{f_\theta}
+\hat A_0
+$$
+
+训练目标：
+
+$$
+\boxed{
+\mathcal L_{\mathrm{RDT}}
+=
+\left\|
+A_0
+-
+f_\theta
+(
+\ell,
+o_t,
+\tilde A_k,
+k
+)
+\right\|_2^2
+}
+$$
+
+展开：
+
+$$
+\boxed{
+\mathcal L_{\mathrm{RDT}}
+=
+\left\|
+A_0
+-
+f_\theta
+\left(
+\ell,
+o_t,
+\sqrt{\bar\alpha_k}A_0
++
+\sqrt{1-\bar\alpha_k}\epsilon,
+k
+\right)
+\right\|_2^2
+}
+$$
+
+其中：
+
+$$
+k
+\sim
+U\{1,\ldots,K\}
+$$
+
+$$
+\epsilon
+\sim
+\mathcal N(0,I)
+$$
+
+所以监督信号非常直接：
+
+$$
+\boxed{
+\text{不管输入有多 noisy，都尽量恢复真正的 Clean Action Chunk}
+}
+$$
+
+更新的是：
+
+* RDT Transformer；
+* low-dimensional MLP；
+* modality adapters；
+* MLP Decoder。
+
+而：
+
+$$
+\boxed{
+\text{T5-XXL Frozen}
+}
+$$
+
+$$
+\boxed{
+\text{SigLIP Frozen}
+}
+$$
+
+---
+
+### 1.17 一次完整 Training Step
+
+把上面压成一条真正的数据链：
+
+```text
+Raw Robot Trajectory
+    │
+    ├── Language l
+    │
+    ├── RGB History X[t-1:t]
+    │     └── 2 time steps × 3 cameras
+    │
+    ├── Proprioception z_t^(r)
+    │
+    ├── Control Frequency c
+    │
+    └── Future Action Chunk A_t^(r)
+          └── 64 steps
+    │
+    ▼
+Physically Interpretable Unified Space
+    │
+    ├── z_t^(r)
+    │      ↓
+    │   z_t ∈ R^128
+    │      +
+    │   availability mask
+    │      ↓
+    │   [z_t ; m_z] ∈ R^256
+    │
+    └── A_t^(r)
+           ↓
+        A_0 ∈ R^(64×128)
+           +
+        availability mask
+    │
+    ▼
+Sample Diffusion Step
+    k ~ Uniform{1,...,1000}
+    │
+    ▼
+Sample Noise
+    ε ~ N(0,I)
+    shape = [64,128]
+    │
+    ▼
+Forward Diffusion
+    A_k =
+    sqrt(ᾱ_k) A_0
+    +
+    sqrt(1-ᾱ_k) ε
+    │
+    ├────────────────────────────────────────────┐
+    │                                            │
+    ▼                                            ▼
+Low-Dimensional Inputs                    Condition Inputs
+                                           
+A_k → Shared Action MLP                  l
+      → [64,2048]                         ↓
+                                         Frozen T5-XXL
+z_t → Shared State MLP                    ↓
+      → [1,2048]                         [N_L,4096]
+                                         ↓
+c → Fourier/MLP                          2-layer Adapter
+    → [1,2048]                            ↓
+                                         C_L [N_L,2048]
+k → Fourier/MLP
+    → [1,2048]                           RGB Images
+                                         ↓
+    │                                    Frozen SigLIP
+    │                                    ↓
+    │                                    Patch Tokens [*,1152]
+    │                                    ↓
+    │                                    2-layer Adapter
+    │                                    ↓
+    │                                    C_I [*,2048]
+    │
+    ▼
+Main Sequence
+length = 1 + 64 + 1 + 1 = 67
+
+X_0 ∈ R^(67×2048)
+    │
+    ▼
+Position Embedding
+    │
+    ▼
+RDT Transformer ×28
+    │
+    ├── RMSNorm
+    ├── QKNorm Self-Attention
+    ├── Residual
+    ├── RMSNorm
+    ├── Cross-Attention
+    │       ↕
+    │   Language / Image
+    │   Alternating Injection
+    ├── Residual
+    ├── RMSNorm
+    ├── FFN
+    └── Residual
+    │
+    ▼
+Final Norm
+    │
+    ▼
+MLP Decoder
+    │
+    ▼
+Predicted Clean Action
+Â_0 ∈ R^(64×128)
+    │
+    ▼
+MSE
+||A_0 - Â_0||²
+    │
+    ▼
+Backpropagation
+```
+
+这一整个过程最重要的一句话是：
+
+$$
+\boxed{
+A_0
+\rightarrow
+A_k
+\rightarrow
+RDT(A_k,\ell,o_t,k)
+\rightarrow
+\hat A_0
+}
+$$
+
+---
+
+### 1.18 Pre-Training 到底训练什么？
+
+RDT 首先使用：
+
+$$
+\boxed{
+46\text{ multi-robot datasets}
+}
+$$
+
+总规模：
+
+$$
+\boxed{
+1M+\text{ trajectories}
+}
+$$
+
+数据量：
+
+$$
+\boxed{
+21TB
+}
+$$
+
+其中大量数据来自不同：
+
+$$
+\text{robot embodiment}
+$$
+
+且很多是：
+
+$$
+\text{single-arm data}
+$$
+
+统一动作空间使这些不同机器人都能转成：
+
+$$
+\boxed{
+128D\ Physical Space
+}
+$$
+
+所以 Pre-training 并不是：
+
+*> 让模型提前学会目标 ALOHA 上所有任务。*
+
+更准确地说是：
+
+$$
+\boxed{
+\text{从大量机器人数据中学习 transferable physical / visuomotor knowledge}
+}
+$$
+
+训练仍然使用同一个：
+
+$$
+\boxed{
+\mathcal L_{\mathrm{RDT}}
+=
+\|A_0-\hat A_0\|^2
+}
+$$
+
+论文预训练：
+
+$$
+\boxed{
+1M\text{ optimization steps}
+}
+$$
+
+使用：
+
+$$
+48\times\text{H100 80GB}
+$$
+
+---
+
+### 1.19 Fine-Tuning 和 Pre-Training 有什么区别？
+
+虽然 Pre-training 已经见过很多机器人，但目标机器人：
+
+$$
+\text{dual-arm ALOHA}
+$$
+
+仍然存在：
+
+$$
+\boxed{
+\text{Embodiment Gap}
+}
+$$
+
+因此 RDT 又收集目标双臂机器人数据：
+
+$$
+\boxed{
+6K+\text{ trajectories}
+}
+$$
+
+覆盖：
+
+$$
+300+\text{ tasks}
+$$
+
+$$
+100+\text{ objects}
+$$
+
+$$
+15+\text{ scenes}
+$$
+
+然后：
+
+$$
+\boxed{
+\text{Pretrained RDT}
+\rightarrow
+\text{Bimanual Fine-Tuning}
+}
+$$
+
+这里和 RDT2 非常不同。
+
+RDT2 是：
+
+$$
+\text{Stage 1 CE}
+\rightarrow
+\text{Stage 2 Flow}
+\rightarrow
+\text{Stage 3 Distillation}
+$$
+
+训练目标发生改变。
+
+RDT-1B 则始终是：
+
+$$
+\boxed{
+\text{Diffusion Denoising}
+}
+$$
+
+Fine-tuning 时仍然：
+
+$$
+A_0
+\rightarrow
+A_k
+\rightarrow
+RDT
+\rightarrow
+\hat A_0
+$$
+
+并优化：
+
+$$
+\boxed{
+\|A_0-\hat A_0\|^2
+}
+$$
+
+只是训练数据从：
+
+$$
+\text{large-scale heterogeneous multi-robot data}
+$$
+
+变成：
+
+$$
+\text{high-quality target bimanual data}
+$$
+
+所以可以理解成：
+
+$$
+\boxed{
+\text{Pre-training 学 transferable knowledge}
+}
+$$
+
+$$
++
+$$
+
+$$
+\boxed{
+\text{Fine-tuning 对齐 target embodiment}
+}
+$$
+
+---
+
+### 1.20 Fine-Tuning 中的数据增强
+
+大模型在只有：
+
+$$
+6K+
+$$
+
+轨迹的数据上容易 overfit。
+
+因此 RDT 使用：
+
+**Image augmentation：**
+
+$$
+\text{Color Jittering}
++
+\text{Image Corruption}
+$$
+
+**Proprioception augmentation：**
+
+给 state 加 Gaussian Noise：
+
+$$
+\boxed{
+\mathrm{SNR}=40\text{ dB}
+}
+$$
+
+**Language augmentation：**
+
+人工 instruction 进一步通过 GPT-4-Turbo 产生：
+
+$$
+\text{Original}
+$$
+
+$$
+\text{Expanded}
+$$
+
+$$
+\text{Simplified}
+$$
+
+Fine-tuning 时三类 instruction：
+
+$$
+\boxed{
+\frac13:\frac13:\frac13
+}
+$$
+
+进行采样。
+
+此外还会删除 trajectory 开头 operator 尚未开始操作产生的：
+
+$$
+\boxed{
+\text{Static Segment}
+}
+$$
+
+论文最终没有使用：
+
+$$
+\boxed{
+\text{Classifier-Free Guidance}
+}
+$$
+
+因为实际发现 CFG 没有提高性能，反而会导致机器人行为不稳定。
+
+---
+
+### 1.21 推理：没有 Ground-Truth Action 怎么办？
+
+训练时我们有：
+
+$$
+A_0
+$$
+
+因此可以：
+
+$$
+A_0
+\rightarrow
+A_k
+$$
+
+但部署时未来真实动作当然不存在。
+
+当前只有：
+
+$$
+\boxed{
+(\ell,X_{t-1:t},z_t,c)
+}
+$$
+
+所以必须从纯 Gaussian Noise 开始。
+
+初始化：
 
 $$
 \boxed{
@@ -3097,240 +2686,100 @@ A_K
 }
 $$
 
-shape：
-
-$$
-\boxed{
-A_K
-\in
-\mathbb R^{B\times64\times128}
-}
-$$
-
-此时 $A_K$ 基本没有有意义的动作结构。
-
----
-
-### 21.4 Step 4：构造第一个 Main Sequence
-
-当前 diffusion timestep：
-
-$$
-k=K
-$$
-
-编码：
-
-$$
-T_K
-\in
-\mathbb R^{B\times1\times2048}
-$$
-
-当前 noisy action：
-
-$$
-A_K
-\in
-\mathbb R^{B\times64\times128}
-$$
-
-经过 Action MLP：
-
-$$
-T_{A_K}
-\in
-\mathbb R^{B\times64\times2048}
-$$
-
-构造：
-
-$$
-X_K
-=
-[
-T_K;
-T_c;
-T_z;
-T_{A_K}
-]
-$$
-
-得到：
-
-$$
-\boxed{
-X_K
-\in
-\mathbb R^{B\times67\times2048}
-}
-$$
-
----
-
-### 21.5 Step 5：完整运行 RDT × 28
-
-经过：
-
-$$
-RDT_\theta
-(
-X_K,
-C_L,
-C_I
-)
-$$
-
-得到：
-
-$$
-X'_K
-\in
-\mathbb R^{B\times67\times2048}
-$$
-
-Decoder：
-
-$$
-X'_K
-\rightarrow
-\hat A_0^{(K)}
-$$
-
 其中：
 
 $$
-\boxed{
-\hat A_0^{(K)}
-\in
-\mathbb R^{B\times64\times128}
-}
-$$
-
-这里模型的意思是：
-
-> 根据当前噪声 $A_K$ 和所有条件，我认为最终干净动作应该接近 $\hat A_0^{(K)}$。
-
----
-
-### 21.6 Step 6：Reverse Diffusion 更新
-
-根据 DDPM posterior：
-
-$$
-\boxed{
-A_{K-1}
-=
-C_1(K)\hat A_0^{(K)}
-+
-C_2(K)A_K
-+
-\sigma_Kz
-}
-$$
-
-其中：
-
-$$
-z\sim\mathcal N(0,I)
-$$
-
-shape：
-
-$$
-A_K:
-B\times64\times128
-$$
-
-$$
-\hat A_0^{(K)}:
-B\times64\times128
-$$
-
-得到：
-
-$$
-\boxed{
-A_{K-1}:
-B\times64\times128
-}
-$$
-
-shape 不改变。
-
-但：
-
-$$
-\boxed{
-A_{K-1}
-\text{ 比 }
 A_K
-\text{ 更接近有效动作}
+\in
+\mathbb R^{64\times128}
+$$
+
+然后：
+
+$$
+A_K
+\xrightarrow[\ell,o_t,K]{RDT}
+\hat A_0^{(K)}
+$$
+
+注意这里 RDT 输出的是：
+
+$$
+\boxed{
+\text{当前 noisy action 对应的 Clean Action Estimate}
 }
 $$
 
----
-
-### 21.7 Step 7：重新运行整个 Transformer
-
-现在：
+即：
 
 $$
-k=K-1
+\hat A_0^{(K)}
 $$
 
+而不是直接把这个 estimate 当最终结果。
+
+它会根据 diffusion solver 更新：
+
 $$
-A_k=A_{K-1}
+A_K
+\rightarrow
+A_{K-1}
 $$
 
-重新编码：
+然后重新：
 
 $$
 A_{K-1}
-\rightarrow
-T_{A_{K-1}}
-$$
-
-然后重新构造：
-
-$$
-X_{K-1}
-=
-[
-T_{K-1};
-T_c;
-T_z;
-T_{A_{K-1}}
-]
-$$
-
-再次：
-
-$$
-X_{K-1}
-\rightarrow
-RDT\times28
-\rightarrow
+\xrightarrow{RDT}
 \hat A_0^{(K-1)}
 $$
 
-再：
-
-$$
-A_{K-2}
-=
-C_1\hat A_0^{(K-1)}
-+
-C_2A_{K-1}
-+
-\sigma z
-$$
+不断迭代。
 
 ---
 
-### 21.8 Step 8：不断迭代
+### 1.22 DDPM 视角下的一次 Reverse Update
 
-于是：
+论文中的基本 diffusion formulation 可以写成：
+
+$$
+A_{k-1}
+=
+\frac{
+\sqrt{\bar\alpha_{k-1}}\beta_k
+}{
+1-\bar\alpha_k
+}
+\hat A_0^{(k)}
++
+\frac{
+\sqrt{\alpha_k}
+(1-\bar\alpha_{k-1})
+}{
+1-\bar\alpha_k
+}
+A_k
++
+\sigma_k z
+$$
+
+其中：
+
+$$
+\beta_k=1-\alpha_k
+$$
+
+而：
+
+$$
+\hat A_0^{(k)}
+=
+f_\theta(
+\ell,o_t,A_k,k
+)
+$$
+
+因此整个生成过程是：
 
 $$
 A_K
@@ -3352,6 +2801,8 @@ $$
 \vdots
 $$
 
+直到：
+
 $$
 A_1
 \xrightarrow{RDT}
@@ -3360,15 +2811,13 @@ A_1
 A_0
 $$
 
-整体：
+即：
 
 $$
 \boxed{
 A_K
 \rightarrow
 A_{K-1}
-\rightarrow
-A_{K-2}
 \rightarrow
 \cdots
 \rightarrow
@@ -3376,177 +2825,81 @@ A_0
 }
 $$
 
-最终：
+---
+
+### 1.23 实际部署不是跑 1000 次 RDT
+
+训练 noise schedule 使用：
 
 $$
-A_0
-=
-[a_t,a_{t+1},\ldots,a_{t+63}]
+K=1000
 $$
 
-其中：
+但如果推理也跑 1000 次：
 
 $$
 \boxed{
-A_0
-\in
-\mathbb R^{64\times128}
+\text{完全无法实时控制机器人}
 }
 $$
 
-即未来 64 步动作块。
+因此实际 inference 使用：
+
+$$
+\boxed{
+\text{DPM-Solver++}
+}
+$$
+
+论文配置只需要：
+
+$$
+\boxed{
+5\text{ sampling steps}
+}
+$$
+
+所以实际更加接近：
+
+$$
+A^{(5)}
+\rightarrow
+A^{(4)}
+\rightarrow
+A^{(3)}
+\rightarrow
+A^{(2)}
+\rightarrow
+A^{(1)}
+\rightarrow
+A^{(0)}
+$$
+
+而不是完整走完训练时的 1000 个 discrete noise levels。
 
 ---
 
-## 22. 推理流程压缩成一条数据链
+### 1.24 一个很重要的效率问题：每次 denoise 都要重新跑 RDT
 
-```text
-Current Observation
+这里和：
 
-Language l
-Images I
-Robot State z_t
-Control Frequency c
-
-        │
-        ▼
-
-Language:
-l → T5 → Adapter → C_L
-
-Image:
-I → SigLIP → Adapter → C_I
-
-State:
-z_t → MLP → T_z
-
-Frequency:
-c → Embedding → MLP → T_c
-
-        │
-        ▼
-
-Random Action Initialization
-
-A_K ~ N(0,I)
-
-shape:
-[64,128]
-
-        │
-        ▼
-
-encode A_K
-
-[64,128]
-   ↓
-Action MLP
-   ↓
-[64,2048]
-
-        │
-        ▼
-
-construct Main Sequence
-
-[K][freq][state][A_K ×64]
-
-shape:
-[67,2048]
-
-        │
-        ▼
-
-RDT Transformer ×28
-
-Language / Image
-alternating Cross-Attention
-
-        │
-        ▼
-
-MLP Decoder
-
-        │
-        ▼
-
-Â_0^(K)
-
-shape:
-[64,128]
-
-        │
-        ▼
-
-Reverse Diffusion
-
-A_{K-1}
-=
-C_1 Â_0^(K)
+$$
+\text{Backbone}
 +
-C_2 A_K
-+
-σ_K z
+\text{Small Diffusion Head}
+$$
 
-        │
-        ▼
+结构非常不同。
 
-A_{K-1}
-
-        │
-        ▼
-
-重新构造 Main Sequence
-
-        │
-        ▼
-
-RDT Transformer ×28
-
-        │
-        ▼
-
-Â_0^(K-1)
-
-        │
-        ▼
-
-A_{K-2}
-
-        │
-       ...
-
-        ▼
-
-A_0
-
-        │
-        ▼
-
-Final Action Chunk
-
-[a_t,...,a_{t+63}]
-```
-
----
-
-## 23. 一个非常重要的效率区别
-
-RDT 每一次 diffusion step 都改变：
+RDT 中：
 
 $$
 A_k
 $$
 
-而：
+本身就是 Transformer Main Sequence 的一部分。
 
-$$
-A_k
-$$
-
-就在 Transformer Main Sequence 里面。
-
-所以：
+因此：
 
 $$
 A_k
@@ -3554,7 +2907,9 @@ A_k
 A_{k-1}
 $$
 
-之后必须重新执行：
+之后，Main Sequence 已经发生变化。
+
+所以必须重新计算：
 
 $$
 \boxed{
@@ -3562,349 +2917,372 @@ RDT\ Transformer\times28
 }
 $$
 
-也就是：
+即：
 
 ```text
 A_K
- ↓
+ │
+ ▼
 RDT ×28
- ↓
+ │
+ ▼
 Â_0
- ↓
-Reverse Diffusion
- ↓
-A_K-1
- ↓
+ │
+ ▼
+Solver Update
+ │
+ ▼
+A_next
+ │
+ ▼
 RDT ×28
- ↓
+ │
+ ▼
 Â_0
- ↓
-Reverse Diffusion
- ↓
-A_K-2
- ↓
-...
+ │
+ ▼
+Solver Update
+ │
+ ...
 ```
 
-这和 Octo 有本质区别。
-
-Octo：
-
-```text
-Observation
-    ↓
-Transformer Backbone
-    ↓
-Condition Representation
-    ↓
-Small Diffusion Head
-    ↓
-多次去噪
-```
-
-所以可以理解为：
+因此更准确地说：
 
 $$
 \boxed{
-Octo:
-Transformer=\text{Condition Encoder}
+\text{RDT Transformer 本身就是 Diffusion Denoiser}
 }
 $$
 
-而：
+而不是：
 
 $$
-\boxed{
-RDT:
-Transformer=\text{Diffusion Model}
-}
-$$
-
-这也是为什么 RDT 的 diffusion inference 成本更高。
-
----
-
-## 24. RDT vs Octo
-
-|                  | Octo                      | RDT-1B                              |
-| ---------------- | ------------------------- | ----------------------------------- |
-| Transformer 主序列  | Task + Observation        | State + Noisy Action                |
-| Language / Image | Transformer 输入 Token      | Cross-Attention Condition           |
-| Action Diffusion | 独立小 Action Head           | RDT Transformer 本身                  |
-| 预测目标             | Noise $\epsilon$          | Clean Action $A_0$                  |
-| Action Chunk     | 较短                        | 64                                  |
-| Action Tokens    | Diffusion Head 内部处理       | Transformer 主序列                     |
-| Condition 融合     | Block-wise Self-Attention | Language / Image 交替 Cross-Attention |
-| 多机器人统一           | Padding / Adapter 等       | 128D Unified Physical Space         |
-
-最核心区别：
-
-$$
-\boxed{
-Octo:
-\text{先理解 Observation，再由小 Head 生成动作}
-}
-$$
-
-而：
-
-$$
-\boxed{
-RDT:
-\text{直接让大 Transformer 对整段动作进行去噪}
-}
+\text{Transformer 只负责产生一次 Condition Feature}
 $$
 
 ---
 
-## 25. 最后只记这 7 个点
+### 1.25 最终 Action 怎么变回真实机器人命令？
 
-### 25.1 Main Sequence
-
-$$
-\boxed{
-[k,\ freq,\ state,\ noisy\ actions_{1:64}]
-}
-$$
-
-长度：
-
-$$
-67
-$$
-
-hidden：
-
-$$
-2048
-$$
-
----
-
-### 25.2 Language / Image 是 Condition
-
-不是：
-
-$$
-[Language;Image;State;Action]
-$$
-
-全部 concat。
-
-而是：
-
-$$
-Q=\text{Main Sequence}
-$$
-
-$$
-K,V=\text{Condition}
-$$
-
----
-
-### 25.3 Alternating Cross-Attention
-
-$$
-\boxed{
-Language
-\rightarrow
-Image
-\rightarrow
-Language
-\rightarrow
-Image
-}
-$$
-
-避免：
-
-$$
-Vision\ Dominates\ Language
-$$
-
----
-
-### 25.4 Action Tokens 双向 Self-Attention
-
-$$
-a_i
-\leftrightarrow
-a_j
-$$
-
-64 步未来动作整体联合建模：
-
-$$
-\boxed{
-\text{Trajectory-Level Coordination}
-}
-$$
-
-而不是 autoregressive action generation。
-
----
-
-### 25.5 Predict Clean Action
-
-训练时：
+最终得到：
 
 $$
 A_0
+\in
+\mathbb R^{64\times128}
+$$
+
+但机器人本身当然没有：
+
+$$
+128
+$$
+
+个 control dimensions。
+
+128D 只是：
+
+$$
+\boxed{
+\text{Unified Physical Representation}
+}
+$$
+
+因此对于当前机器人 $r$，根据：
+
+$$
+m_a
+$$
+
+只选择该 embodiment 真正存在的 physical dimensions：
+
+$$
+A_0
+\xrightarrow{\text{Select Valid Dimensions}}
+A_0^{(r)}
+$$
+
+再按照机器人原本的 action definition：
+
+$$
+\boxed{
+A_0^{(r)}
+=
+[a_t^{(r)},\ldots,a_{t+63}^{(r)}]
+}
+$$
+
+交给底层 robot controller。
+
+也就是说完整闭环是：
+
+$$
+\boxed{
+\text{Observe}
 \rightarrow
+\text{Generate Action Chunk}
+\rightarrow
+\text{Execute}
+\rightarrow
+\text{Observe Again}
+}
+$$
+
+而不是一次生成整条 episode 后完全 open-loop 执行。
+
+---
+
+### 1.26 完整推理流程
+
+```text
+Language Instruction l
+Current Robot Observation
+    │
+    ├── RGB History
+    │     [t-1,t] × 3 cameras
+    │
+    ├── Robot State z_t
+    │
+    └── Frequency c
+    │
+    ▼
+
+State
+native representation
+    ↓
+128D Unified Physical Space
+    ↓
++ Availability Mask
+    ↓
+Shared MLP
+    ↓
+State Token [1,2048]
+
+Language
+    ↓
+Frozen T5-XXL
+    ↓
+[N_L,4096]
+    ↓
+2-layer Adapter
+    ↓
+Language Condition [N_L,2048]
+
+Images
+    ↓
+Frozen SigLIP
+    ↓
+Patch Tokens [...,1152]
+    ↓
+Multi-Dim Positional Encoding
+    ↓
+2-layer Adapter
+    ↓
+Image Condition [...,2048]
+
+Frequency
+    ↓
+Fourier / MLP
+    ↓
+[1,2048]
+
+Random Action Chunk
+A_K ~ N(0,I)
+shape = [64,128]
+    ↓
++ Availability Mask
+    ↓
+Shared Action MLP
+    ↓
+[64,2048]
+
+        │
+        ▼
+Construct Main Sequence
+length = 67
+hidden = 2048
+
+        │
+        ▼
+RDT Transformer ×28
+        │
+        ├── Self-Attention over
+        │   State + 64 Action Tokens
+        │
+        └── Alternating Cross-Attention
+            Language / Image
+        │
+        ▼
+MLP Decoder
+        │
+        ▼
+Predicted Clean Action
+Â_0
+[64,128]
+        │
+        ▼
+DPM-Solver++ Update
+        │
+        ▼
+Next Noisy Action
+        │
+        └───────────────↺ 5 sampling steps
+
+        │
+        ▼
+Final Unified Action Chunk
+A_0
+[64,128]
+        │
+        ▼
+Select Current Robot Valid Dimensions
+        │
+        ▼
+Native Robot Action Chunk
+        │
+        ▼
+Robot Controller
+```
+
+---
+
+### 1.27 RDT-1B 的核心到底是什么？
+
+如果把所有细节压缩掉，RDT-1B 实际上只有下面四个核心设计。
+
+**第一：128D Physically Interpretable Unified Space**
+
+$$
+\boxed{
+\text{不同 Robot}
+\rightarrow
+\text{同一套 Physical Semantics}
+}
+$$
+
+不是简单 padding，而是：
+
+$$
+\boxed{
+\text{同一个 index 永远代表同一种物理量}
+}
+$$
+
+使 multi-robot pre-training 成为可能。
+
+---
+
+**第二：Transformer 本身直接处理 Noisy Action Chunk**
+
+$$
+\boxed{
 A_k
 \rightarrow
 RDT
 \rightarrow
 \hat A_0
+}
 $$
 
-即：
+也就是说：
 
 $$
 \boxed{
-A_k\rightarrow\hat A_0
+\text{RDT Transformer 本身就是 Diffusion Denoiser}
 }
 $$
 
 ---
 
-### 25.6 128D Unified Physical Space
+**第三：Language / Image 是 Condition，不是 Main Sequence**
 
-不同机器人：
-
-$$
-Robot_A,\ Robot_B,\ Robot_C
-$$
-
-先：
+Main Sequence：
 
 $$
 \boxed{
-\text{按物理语义映射到统一 128D 空间}
+\text{Diffusion Step}
++
+\text{Frequency}
++
+\text{State}
++
+\text{Noisy Action Chunk}
 }
 $$
 
-再进行联合训练。
-
----
-
-### 25.7 Transformer 本身就是 Denoiser
-
-因为：
-
-$$
-A_k
-$$
-
-直接进入 Transformer：
+Condition：
 
 $$
 \boxed{
-A_k
+\text{Language}
++
+\text{Image}
+}
+$$
+
+通过：
+
+$$
+\boxed{
+\text{Cross-Attention}
+}
+$$
+
+注入。
+
+---
+
+**第四：Language / Image 交替注入**
+
+$$
+\boxed{
+\text{Language}
 \rightarrow
-RDT\times28
+\text{Image}
 \rightarrow
-\hat A_0
+\text{Language}
+\rightarrow
+\text{Image}
+\rightarrow\cdots
 }
 $$
 
-所以每一次 diffusion iteration：
+避免大量 visual patch tokens：
 
 $$
 \boxed{
-\text{都要重新运行整个 RDT Transformer}
+\text{压过 Language Signal}
 }
 $$
 
 ---
 
-## 26. 脑内最终模型
+所以最终可以把 RDT-1B 记成一句话：
 
-看到 RDT-1B，只需要在脑中形成下面这张图：
-
-```text
-                     Multi-Robot Data
-                           │
-                           ▼
-                128D Unified Physical Space
-                           │
-              ┌────────────┴─────────────┐
-              │                          │
-          Robot State               Action Chunk
-           [128]                     [64,128]
-              │                          │
-              │                     Add Noise
-              │                          │
-              │                         A_k
-              │                          │
-              ▼                          ▼
-          State MLP                  Action MLP
-              │                          │
-           [1,2048]                 [64,2048]
-              │                          │
-              └────────────┬─────────────┘
-                           │
-            k ── Embedding ┤
-         freq ── Embedding ┤
-                           │
-                           ▼
-
-          Main Sequence = [k][freq][state][A_k×64]
-
-                     [67,2048]
-
-                           │
-                           ▼
-
-              ┌────────────────────────┐
-              │     RDT ×28 Layers     │
-              │                        │
-              │ RMSNorm                │
-              │    ↓                   │
-              │ Self-Attention         │
-              │    ↓                   │
-              │ Cross-Attention ◄──────── Language
-              │    ↓                   │      ↓
-              │ FFN                    │     T5
-              │                        │      ↓
-              │ Cross-Attention ◄──────── Adapter
-              │                        │
-              │ Cross-Attention ◄──────── Images
-              │                        │      ↓
-              │                        │   SigLIP
-              │                        │      ↓
-              │                        │   Adapter
-              └────────────┬───────────┘
-                           │
-                           ▼
-
-                       RMSNorm
-                           │
-                           ▼
-                      MLP Decoder
-                           │
-                           ▼
-
-                   Predicted Clean Action
-
-                       Â_0
-                     [64,128]
-
-                           │
-             ┌─────────────┴──────────────┐
-             │                            │
-          Training                     Inference
-             │                            │
-             ▼                            ▼
-       compare A_0               Reverse Diffusion
-             │                            │
-             ▼                            ▼
-       MSE Loss                  A_k → A_{k-1}
-                                          │
-                                          └──────↺
-```
-
-最终一句话：
-
-> **RDT-1B = 先用具有固定物理语义的 128D 空间统一不同机器人数据，再把 Diffusion Timestep、Control Frequency、Robot State 和 64 个 Noisy Action Token 组成 Transformer Main Sequence；Language 与 Image 分别经过冻结的 T5 / SigLIP 编码，并通过 28 层中交替出现的 Cross-Attention 注入动作序列；64 个 Action Token 在 Self-Attention 中双向联合建模，最后由 Transformer 本身完成 Diffusion Denoising，直接预测未来 64 步 Clean Action Chunk。**
+$$
+\boxed{
+\begin{aligned}
+\text{Multi-Robot Data}
+&\rightarrow
+\text{128D Unified Physical Space}
+\\
+&\rightarrow
+\text{Noisy 64-Step Action Chunk}
+\\
+&\rightarrow
+\text{28-Layer Diffusion Transformer}
+\\
+&\xleftarrow{\text{Cross-Attention}}
+\text{T5 Language / SigLIP Vision}
+\\
+&\rightarrow
+\text{Predict Clean Action Chunk}
+\\
+&\rightarrow
+\text{Iterative Denoising}
+\\
+&\rightarrow
+\text{Robot Action}
+\end{aligned}
+}
+$$
